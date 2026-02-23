@@ -1,0 +1,28 @@
+<script>
+const socket = new WebSocket("wss://37.27.33.65:8089");
+
+socket.onopen = function() {
+  console.log("Connected to WebSocket");
+};
+
+socket.onmessage = function(event) {
+  const data = JSON.parse(event.data);
+  if (data.type === 'new_ticket') {
+    alert("🎫 New ticket: " + data.title);
+    // Optionally: reload table or append to DOM
+  }
+};
+
+socket.onclose = function(event) {
+  console.warn("WebSocket closed:", {
+    code: event.code,
+    reason: event.reason,
+    wasClean: event.wasClean
+  });
+};
+
+
+socket.onerror = function(e) {
+  console.error("WebSocket Error", e);
+};
+</script>
