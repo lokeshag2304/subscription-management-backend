@@ -11,6 +11,7 @@ use Illuminate\Support\Str;
 use Carbon\Carbon;
 use Illuminate\Support\Facades\Validator;
 use App\Services\CryptService;
+use App\Services\DateFormatterService;
 use App\Services\CustomCipherService;
 
 class ProductsController extends Controller
@@ -134,14 +135,19 @@ public function ProductsList(Request $request)
     $allProducts = DB::table('products')
         ->get()
         ->map(function ($item) {
-
             try {
                 $item->name = CryptService::decryptData($item->name);
             } catch (\Exception $e) {}
 
-            $item->created_at = Carbon::parse($item->created_at)->format('M-d-Y h:i A');
+            $item->updated_at = DateFormatterService::format($item->updated_at ?? $item->created_at);
+            $item->last_updated = $item->updated_at;
+            $item->created_at = DateFormatterService::format($item->created_at);
             return $item;
-        });
+        })
+        ->unique(function ($item) {
+            return strtolower(trim($item->name));
+        })
+        ->values();
 
     if ($search !== '') {
         $allProducts = $allProducts->filter(function ($item) use ($search) {

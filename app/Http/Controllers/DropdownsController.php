@@ -5,25 +5,24 @@ namespace App\Http\Controllers;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use App\Services\CryptService;
+use App\Services\ClientScopeService;
 
 class DropdownsController extends Controller
 {
 
-
-
-
 public function getDomains(Request $request)
 {
-    $domains = DB::table('domain')
-        ->select('id', 'name')
-        ->orderBy('id','desc')
+    $query = DB::table('domains')
+        ->select('id', 'name', 'client_id');
+    
+    ClientScopeService::applyScope($query, $request);
+
+    $domains = $query->orderBy('id','desc')
         ->get()
         ->map(function ($domain) {
             try {
-                $domain->name = CryptService::decryptData($domain->name);
-            } catch (\Exception $e) {
-                $domain->name = $domain->name;
-            }
+                $domain->name = CryptService::decryptData($domain->name) ?? $domain->name;
+            } catch (\Exception $e) {}
             return $domain;
         });
 
@@ -36,68 +35,68 @@ public function getDomains(Request $request)
 
 public function getProduct(Request $request)
 {
-    $domains = DB::table('products')
+    // Products are usually global, but if they are per-client, apply scope.
+    // For now, let's keep it global as it's a "Category".
+    $products = DB::table('products')
         ->select('id', 'name')
         ->orderBy('id','desc')
         ->get()
-        ->map(function ($domain) {
+        ->map(function ($product) {
             try {
-                $domain->name = CryptService::decryptData($domain->name);
-            } catch (\Exception $e) {
-                $domain->name = $domain->name;
-            }
-            return $domain;
+                $product->name = CryptService::decryptData($product->name) ?? $product->name;
+            } catch (\Exception $e) {}
+            return $product;
         });
 
     return response()->json([
         'status' => true,
         'message' => 'products fetched successfully',
-        'data' => $domains
+        'data' => $products
     ]);
 }
 
 public function getVendors(Request $request)
 {
-    $domains = DB::table('vendors')
+    // Vendors are usually global.
+    $vendors = DB::table('vendors')
         ->select('id', 'name')
         ->orderBy('id','desc')
         ->get()
-        ->map(function ($domain) {
+        ->map(function ($vendor) {
             try {
-                $domain->name = CryptService::decryptData($domain->name);
-            } catch (\Exception $e) {
-                $domain->name = $domain->name;
-            }
-            return $domain;
+                $vendor->name = CryptService::decryptData($vendor->name) ?? $vendor->name;
+            } catch (\Exception $e) {}
+            return $vendor;
         });
 
     return response()->json([
         'status' => true,
         'message' => 'vendors fetched successfully',
-        'data' => $domains
+        'data' => $vendors
     ]);
 }
 
 public function getClients(Request $request)
 {
-    $domains = DB::table('superadmins')
-        ->select('id', 'name')
-        ->where('login_type', 3)   
-        ->orderBy('id', 'desc')
+    $query = DB::table('superadmins')
+        ->select('id', 'name');
+    
+    // If client, they only see themselves
+    ClientScopeService::applyScope($query, $request, 'id');
+
+    $clients = $query->orderBy('id', 'desc')
         ->get()
-        ->map(function ($domain) {
+        ->map(function ($client) {
             try {
-                $domain->name = CryptService::decryptData($domain->name);
-            } catch (\Exception $e) {
-                $domain->name = $domain->name;
-            }
-            return $domain;
+                $client->name = CryptService::decryptData($client->name) ?? $client->name;
+            } catch (\Exception $e) {}
+            return $client;
         });
 
     return response()->json([
         'status' => true,
         'message' => 'clients fetched successfully',
-        'data' => $domains
+        'data' => $clients
     ]);
 }
 

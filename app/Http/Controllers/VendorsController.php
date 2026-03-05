@@ -11,6 +11,7 @@ use Illuminate\Support\Str;
 use Carbon\Carbon;
 use Illuminate\Support\Facades\Validator;
 use App\Services\CryptService;
+use App\Services\DateFormatterService;
 use App\Services\CustomCipherService;
 
 class VendorsController extends Controller
@@ -84,54 +85,54 @@ public function updateVendors(Request $request)
 {
     $data = json_decode($request->getContent(), true);
 
-    $domainId   = $data['id'] ?? null;
+    $vendorId   = $data['id'] ?? null; // Changed from $domainId to $vendorId
     $newName    = $data['name'] ?? null;
     $s_id       = $data['s_id'] ?? null;
 
-    if (!$domainId || !$newName || !$s_id) {
+    if (!$vendorId || !$newName || !$s_id) { // Changed from $domainId to $vendorId
         return response()->json([
             'success' => false,
             'message' => 'id, name and s_id are required',
         ], 422);
     }
 
-    // Fetch existing domain
-    $domain = DB::table('vendors')->where('id', $domainId)->first();
+    // Fetch existing vendor
+    $vendor = DB::table('vendors')->where('id', $vendorId)->first(); // Changed from $domain to $vendor
 
-    if (!$domain) {
+    if (!$vendor) { // Changed from $domain to $vendor
         return response()->json([
             'success' => false,
-            'message' => 'vendors not found',
+            'message' => 'Vendor not found', // Changed message
         ], 404);
     }
 
     // Decrypt old name
     try {
-        $oldName = CryptService::decryptData($domain->name);
+        $oldName = CryptService::decryptData($vendor->name); // Changed from $domain->name to $vendor->name
     } catch (\Exception $e) {
-        $oldName = $domain->name;
+        $oldName = $vendor->name; // Changed from $domain->name to $vendor->name
     }
 
     // Encrypt new name
     $encryptedNewName = CryptService::encryptData($newName);
 
-    // Update domain
-    DB::table('products')
-        ->where('id', $domainId)
+    // Update vendor
+    DB::table('vendors')
+        ->where('id', $vendorId)
         ->update([
             'name' => $encryptedNewName
         ]);
 
-    $changeMessage = "vendors updated: OLD -> {$oldName} , NEW -> {$newName}";
+    $changeMessage = "Vendor updated: OLD -> {$oldName} , NEW -> {$newName}"; // Changed message
 
     DB::table('activities')->insert([
-        'action'     => CryptService::encryptData("vendors Updated"),
-        's_action'   => CustomCipherService::encryptData("vendors Updated"),
+        'action'     => CryptService::encryptData("Vendor Updated"), // Changed message
+        's_action'   => CustomCipherService::encryptData("Vendor Updated"), // Changed message
         'user_id'    => $s_id,
         'message'    => CryptService::encryptData($changeMessage),
         's_message'  => CustomCipherService::encryptData($changeMessage),
         'details'    => CryptService::encryptData(json_encode([
-            'domain_id' => $domainId,
+            'vendor_id' => $vendorId, // Changed from domain_id to vendor_id
             'old_name'  => $oldName,
             'new_name'  => $newName,
         ])),
@@ -141,7 +142,7 @@ public function updateVendors(Request $request)
 
     return response()->json([
         'success' => true,
-        'message' => 'vendors updated successfully.',
+        'message' => 'Vendor updated successfully.', // Changed message
     ]);
 }
 
@@ -153,7 +154,7 @@ public function VendorsList(Request $request)
     $orderBy     = $request->input('orderBy', 'name'); 
     $search      = strtolower($request->input('search', ''));
 
-    $allProducts = DB::table('vendors')
+    $allVendors = DB::table('vendors')
         ->get()
         ->map(function ($item) {
 
@@ -161,23 +162,25 @@ public function VendorsList(Request $request)
                 $item->name = CryptService::decryptData($item->name);
             } catch (\Exception $e) {}
 
-            $item->created_at = Carbon::parse($item->created_at)->format('M-d-Y h:i A');
+            $item->updated_at = DateFormatterService::format($item->updated_at ?? $item->created_at);
+            $item->last_updated = $item->updated_at;
+            $item->created_at = DateFormatterService::format($item->created_at);
             return $item;
         });
 
     if ($search !== '') {
-        $allProducts = $allProducts->filter(function ($item) use ($search) {
+        $allVendors = $allVendors->filter(function ($item) use ($search) {
             return str_contains(strtolower($item->name), $search);
         })->values();
     }
 
-    $allProducts = $allProducts->sortBy(function ($item) use ($orderBy) {
+    $allVendors = $allVendors->sortBy(function ($item) use ($orderBy) {
         return strtolower($item->{$orderBy});
     }, SORT_REGULAR, $order === 'desc')->values();
 
-    $total = $allProducts->count();
+    $total = $allVendors->count();
 
-    $paged = $allProducts->slice($page * $rowsPerPage, $rowsPerPage)->values();
+    $paged = $allVendors->slice($page * $rowsPerPage, $rowsPerPage)->values();
 
     return response()->json([
         'rows'  => $paged,
@@ -185,56 +188,56 @@ public function VendorsList(Request $request)
     ]);
 }
 
-public function deleteProducts(Request $request)
+public function deleteVendors(Request $request)
 {
     $data = json_decode($request->getContent(), true);
 
-    $domainIds = $data['ids'] ?? [];
+    $vendorIds = $data['ids'] ?? [];
     $deletedBy = $data['s_id'] ?? null;
 
-    if (empty($domainIds) || !$deletedBy || !is_array($domainIds)) {
+    if (empty($vendorIds) || !$deletedBy || !is_array($vendorIds)) {
         return response()->json([
             'success' => false,
             'message' => 'ids (array) and s_id are required',
         ], 422);
     }
 
-    $domains = DB::table('vendors')
-        ->whereIn('id', $domainIds)
+    $vendors = DB::table('vendors')
+        ->whereIn('id', $vendorIds)
         ->get();
 
-    if ($domains->isEmpty()) {
+    if ($vendors->isEmpty()) {
         return response()->json([
             'success' => false,
             'message' => 'No vendors found',
         ], 404);
     }
 
-    $domainNames = [];
+    $vendorNames = [];
 
-    foreach ($domains as $domain) {
+    foreach ($vendors as $vendor) {
         try {
-            $domainNames[] = CryptService::decryptData($domain->name);
+            $vendorNames[] = CryptService::decryptData($vendor->name);
         } catch (\Exception $e) {
-            $domainNames[] = $domain->name;
+            $vendorNames[] = $vendor->name;
         }
     }
 
-    $domainNamesString = implode(', ', $domainNames);
+    $vendorNamesString = implode(', ', $vendorNames);
 
-    DB::table('vendors')->whereIn('id', $domainIds)->delete();
+    DB::table('vendors')->whereIn('id', $vendorIds)->delete();
 
-    $activityMessage = "vendors deleted: " . $domainNamesString;
+    $activityMessage = "Vendors deleted: " . $vendorNamesString;
 
     DB::table('activities')->insert([
-        'action'     => CryptService::encryptData("vendors Deleted"),
-        's_action'   => CustomCipherService::encryptData("vendors Deleted"),
+        'action'     => CryptService::encryptData("Vendors Deleted"),
+        's_action'   => CustomCipherService::encryptData("Vendors Deleted"),
         'user_id'    => $deletedBy,
         'message'    => CryptService::encryptData($activityMessage),
         's_message'  => CustomCipherService::encryptData($activityMessage),
         'details'    => CryptService::encryptData(json_encode([
-            'domain_ids' => $domainIds,
-            'names'      => $domainNames,
+            'vendor_ids' => $vendorIds,
+            'names'      => $vendorNames,
         ])),
         'created_at' => now(),
         'updated_at' => now(),
@@ -242,8 +245,8 @@ public function deleteProducts(Request $request)
 
     return response()->json([
         'success' => true,
-        'message' => 'vendors deleted successfully.',
-        'deleted_vendors' => $domainNames
+        'message' => 'Vendors deleted successfully.',
+        'deleted_vendors' => $vendorNames
     ]);
 }
 }

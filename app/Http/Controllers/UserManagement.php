@@ -49,14 +49,23 @@ public function list(Request $request)
 
     $allUsers = $query->get()->map(function ($item) {
 
-        $item->name   = CryptService::decryptData($item->name);
-        $item->email  = CryptService::decryptData($item->email);
-        $item->number = CryptService::decryptData($item->number);
-        $item->address = CryptService::decryptData($item->address);
-        $item->d_password = CryptService::decryptData($item->d_password);
+        $safeDecrypt = function($value) {
+            if (empty($value)) return $value;
+            try {
+                return CryptService::decryptData($value);
+            } catch (\Exception $e) {
+                return $value;
+            }
+        };
 
-        $item->country = $item->country ? CryptService::decryptData($item->country) : null;
-        $item->created_at = Carbon::parse($item->created_at)->format('M-d-Y h:ia');
+        $item->name       = $safeDecrypt($item->name);
+        $item->email      = $safeDecrypt($item->email);
+        $item->number     = $safeDecrypt($item->number);
+        $item->address    = $safeDecrypt($item->address);
+        $item->d_password = $safeDecrypt($item->d_password);
+
+        $item->country = $item->country ? $safeDecrypt($item->country) : null;
+        $item->created_at = Carbon::parse($item->created_at)->format('j/n/Y, g:i:s a');
 
         return $item;
     });
@@ -457,14 +466,23 @@ public function getUsermanagementDetails(Request $request)
             ], 404);
         }
 
-        // Decrypt basic fields
+        $safeDecrypt = function($value) {
+            if (empty($value)) return $value;
+            try {
+                return CryptService::decryptData($value);
+            } catch (\Exception $e) {
+                return $value;
+            }
+        };
+
+        // Decrypt basic fields safely
         $data = [
             'id'        => $user->id,
-            'name'      => CryptService::decryptData($user->name),
-            'email'     => CryptService::decryptData($user->email),
-            'phone'     => CryptService::decryptData($user->number),
-            'password'     => CryptService::decryptData($user->d_password),
-            'address'   => $user->address ? CryptService::decryptData($user->address) : '',
+            'name'      => $safeDecrypt($user->name),
+            'email'     => $safeDecrypt($user->email),
+            'phone'     => $safeDecrypt($user->number),
+            'password'  => $safeDecrypt($user->d_password),
+            'address'   => $user->address ? $safeDecrypt($user->address) : '',
             'profile'   => $user->profile,
             'login_type'=> $user->login_type, // 2=user, 3=client
             'type'      => ($user->login_type == 3 ? 1 : 2), // form ke liye (1=client,2=user)
@@ -482,9 +500,15 @@ public function getUsermanagementDetails(Request $request)
             $domainList = [];
 
             foreach ($domains as $d) {
+                try {
+                    $decryptedDomainName = CryptService::decryptData($d->name);
+                } catch (\Exception $e) {
+                    $decryptedDomainName = $d->name;
+                }
+                
                 $domainList[] = [
                     'id' => $d->id,
-                    'name' => CryptService::decryptData($d->name)
+                    'name' => $decryptedDomainName
                 ];
             }
 
@@ -697,49 +721,45 @@ public function GetClientDetails(Request $request)
         );
 
         /* =========================
-           TYPE & STATUS MAP
+           TYPE MAP
         ========================= */
         $typeMap = [
-            1 => 'Subscriptions',
-            2 => 'SSL',
-            3 => 'Hosting',
-            4 => 'Domains',
-            5 => 'Emails',
-            6 => 'Counter'
-        ];
-
-        $statusMap = [
-            1 => 'Active',
-            2 => 'Deactive'
+            1 => ['table' => 'subscriptions', 'name' => 'Subscriptions'],
+            2 => ['table' => 's_s_l_s',       'name' => 'SSL'],
+            3 => ['table' => 'hostings',      'name' => 'Hosting'],
+            4 => ['table' => 'domains',       'name' => 'Domains'],
+            5 => ['table' => 'emails',        'name' => 'Emails'],
+            6 => ['table' => 'counters',      'name' => 'Counter']
         ];
 
         /* =========================
            DASHBOARD COUNTS
         ========================= */
         $typeCounts = [];
+        $queries = [];
 
-        foreach ($typeMap as $typeKey => $typeName) {
-
-            $count = DB::table('categories')
-                ->where('record_type', $typeKey)
-                ->where(function ($q) use ($typeKey, $clientDomainIds, $clientId) {
-
-                    // Subscriptions & Counter → client_id
-                    if (in_array($typeKey, [1, 6])) {
-                        $q->where('client_id', $clientId);
-                    }
-                    // Others → domain_id
-                    else {
-                        $q->whereIn('domain_id', $clientDomainIds);
-                    }
-                })
-                ->count();
+        foreach ($typeMap as $typeId => $info) {
+            
+            $qCount = DB::table($info['table'])->where('client_id', $clientId)->count();
 
             $typeCounts[] = [
-                'type_id'   => $typeKey,
-                'type_name' => $typeName,
-                'count'     => $count
+                'type_id'   => $typeId,
+                'type_name' => $info['name'],
+                'count'     => $qCount
             ];
+
+            $q = DB::table($info['table'])
+                ->select(
+                    'id',
+                    DB::raw("$typeId as record_type"),
+                    'status',
+                    'product_id',
+                    'created_at',
+                    'days_left as days_to_expired'
+                )
+                ->where('client_id', $clientId);
+            
+            $queries[] = $q;
         }
 
         /* =========================
@@ -747,31 +767,26 @@ public function GetClientDetails(Request $request)
         ========================= */
         $page        = (int) ($DD['page'] ?? 0);
         $rowsPerPage = (int) ($DD['rowsPerPage'] ?? 10);
-        $orderBy     = $DD['orderBy'] ?? 'id';
+        $orderBy     = $DD['orderBy'] ?? 'created_at';
         $orderDir    = $DD['orderDir'] ?? 'desc';
+        if ($orderBy === 'id') $orderBy = 'created_at'; 
 
         $offset = $page * $rowsPerPage;
         $today  = Carbon::today();
 
         /* =========================
-           FETCH CATEGORIES (PROPER FILTER)
+           FETCH COMBINED SERVICES (UNION)
         ========================= */
-        $catQuery = DB::table('categories')
-            ->where(function ($q) use ($clientDomainIds, $clientId) {
+        $mainQuery = array_shift($queries);
+        foreach ($queries as $q) {
+            $mainQuery->unionAll($q);
+        }
 
-                $q->where(function ($q1) use ($clientDomainIds) {
-                    $q1->whereNotIn('record_type', [1, 6])
-                       ->whereIn('domain_id', $clientDomainIds);
-                })
-                ->orWhere(function ($q2) use ($clientId) {
-                    $q2->whereIn('record_type', [1, 6])
-                       ->where('client_id', $clientId);
-                });
-            });
+        $combinedQuery = DB::query()->fromSub($mainQuery, 'combined_results');
+        
+        $totalCategories = $combinedQuery->count();
 
-        $totalCategories = (clone $catQuery)->count();
-
-        $rows = $catQuery
+        $rows = $combinedQuery
             ->orderBy($orderBy, $orderDir)
             ->offset($offset)
             ->limit($rowsPerPage)
@@ -783,14 +798,6 @@ public function GetClientDetails(Request $request)
         $recentCategories = [];
 
         foreach ($rows as $row) {
-
-            $daysToExpired = null;
-            if (!empty($row->expiry_date)) {
-                $expiry = Carbon::parse($row->expiry_date);
-                $daysToExpired = $expiry->gte($today)
-                    ? $today->diffInDays($expiry)
-                    : -$expiry->diffInDays($today);
-            }
 
             $productName = null;
             if (!empty($row->product_id)) {
@@ -812,11 +819,11 @@ public function GetClientDetails(Request $request)
 
             $recentCategories[] = [
                 'id'              => $row->id,
-                'record_type'     => $typeMap[$row->record_type] ?? 'Unknown',
-                'status'          => $statusMap[$row->status] ?? 'Unknown',
+                'record_type'     => $typeMap[$row->record_type]['name'] ?? 'Unknown',
+                'status'          => (!isset($row->status) || $row->status == 1) ? 'Active' : 'Deactive',
                 'product_name'    => $productName,
                 'created_at'      => Carbon::parse($row->created_at)->format('d F Y'),
-                'days_to_expired' => $daysToExpired
+                'days_to_expired' => $row->days_to_expired ?? 0
             ];
         }
 

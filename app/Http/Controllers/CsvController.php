@@ -12,264 +12,197 @@ use Carbon\Carbon;
 use App\Services\CryptService;
 use App\Services\CustomCipherService;
 use Mpdf\Mpdf;
+use App\Models\ImportHistory;
+use App\Models\Subscription;
+use App\Models\SSL;
+use App\Models\Hosting;
+use App\Models\Domain;
+use App\Models\Email;
+use App\Models\Counter;
+
 class CsvController extends Controller
 {
+    public function exportCategoryRecords(Request $request)
+    {
+        try {
+            // Increase time limit for potentially large exports
+            set_time_limit(180);
 
-public function exportCategoryRecords(Request $request)
-{
-    try {
+            $data = is_array($request->all()) ? $request->all() : json_decode($request->getContent(), true);
+            $recordType = $data['record_type'] ?? null;
 
-        $data = json_decode($request->getContent(), true);
-
-        $recordType = $data['record_type'] ?? null;
-        $s_id       = $data['s_id'] ?? null;
-
-        if (!$recordType || !$s_id) {
-            return response()->json([
-                'success' => false,
-                'message' => 'record_type and s_id are required'
-            ], 400);
-        }
-
-        // =========================
-        // TYPE MAP
-        // =========================
-        $typeMap = [
-            1 => 'Subscriptions',
-            2 => 'SSL',
-            3 => 'Hosting',
-            4 => 'Domains',
-            5 => 'Emails',
-            6 => 'Counter'
-        ];
-
-        if (!isset($typeMap[$recordType])) {
-            return response()->json([
-                'success' => false,
-                'message' => 'Invalid record_type'
-            ], 400);
-        }
-
-        $typeLabel = $typeMap[$recordType];
-
-        // =========================
-        // FETCH DATA (WITH VENDOR)
-        // =========================
-        $rows = DB::table('categories as c')
-            ->leftJoin('superadmins as sa', 'sa.id', '=', 'c.client_id')
-            ->leftJoin('domain as d', 'd.id', '=', 'c.domain_id')
-            ->leftJoin('products as p', 'p.id', '=', 'c.product_id')
-            ->leftJoin('vendors as v', 'v.id', '=', 'c.vendor_id')
-            ->select(
-                'c.*',
-                'sa.name as client_name_enc',
-                'd.name as domain_name_enc',
-                'p.name as product_name_enc',
-                'v.name as vendor_name_enc'
-            )
-            ->where('c.record_type', $recordType)
-            ->orderBy('c.id', 'desc')
-            ->get();
-
-        if ($rows->isEmpty()) {
-            return response()->json([
-                'success' => false,
-                'message' => 'No records found'
-            ], 404);
-        }
-
-        // =========================
-        // EXCEL INIT
-        // =========================
-        $spreadsheet = new Spreadsheet();
-        $sheet = $spreadsheet->getActiveSheet();
-        $rowNo = 1;
-
-        // =========================
-        // TITLE
-        // =========================
-        $sheet->mergeCells("A$rowNo:Z$rowNo");
-        $sheet->setCellValue("A$rowNo", strtoupper($typeLabel) . ' REPORT');
-        $sheet->getStyle("A$rowNo")->getFont()->setBold(true)->setSize(14);
-        $sheet->getStyle("A$rowNo")->getAlignment()
-            ->setHorizontal(\PhpOffice\PhpSpreadsheet\Style\Alignment::HORIZONTAL_CENTER);
-        $rowNo += 2;
-
-        // =========================
-        // HEADERS (SWITCH)
-        // =========================
-        switch ($recordType) {
-
-            case 1:
-                $headers = ['S.No','Product Name','Amount','Renewal Date','Expiry Date','Days Left','Status','Remark','Last Updated'];
-                break;
-
-            case 2:
-                $headers = ['S.No','Domain Name','Client Name','Product Name','Vendor Name','Amount','Renewal Date','Days To Expire','Status','Remark','Last Updated'];
-                break;
-
-            case 3:
-                $headers = ['S.No','Domain Name','Client Name','Product Name','Vendor Name','Valid Till','Today Date','Amount','Renewal Date','Days To Expire','Status','Remark','Last Updated'];
-                break;
-
-            case 4:
-                $headers = ['S.No','Domain Name','Client Name','Product Name','Vendor Name','Amount','Renewal Date','Days To Expire','Status','Remark','Domain Protected','Deletion Date','Last Updated'];
-                break;
-
-            case 5:
-                $headers = ['S.No','Domain Name','Client Name','Product Name','Vendor Name','Amount','Renewal Date','Days To Expire','Status','Remark','Domain Quantity','Bill Type','Start Date','Last Updated'];
-                break;
-
-            case 6:
-                $headers = ['S.No','Domain Name','Client Name','Product Name','Vendor Name','Amount','Renewal Date','Days To Expire','Status','Remark','Last Updated'];
-                break;
-        }
-
-        $col = 'A';
-        foreach ($headers as $h) {
-            $sheet->setCellValue($col . $rowNo, $h);
-            $sheet->getStyle($col . $rowNo)->getFont()->setBold(true);
-            $col++;
-        }
-        $rowNo++;
-
-        // =========================
-        // DATA ROWS
-        // =========================
-        $today  = Carbon::today();
-        $serial = 1;
-
-        foreach ($rows as $r) {
-
-            try { $client  = CryptService::decryptData($r->client_name_enc); } catch (\Exception $e) { $client = ''; }
-            try { $domain  = CryptService::decryptData($r->domain_name_enc); } catch (\Exception $e) { $domain = ''; }
-            try { $product = CryptService::decryptData($r->product_name_enc); } catch (\Exception $e) { $product = ''; }
-            try { $vendor  = CryptService::decryptData($r->vendor_name_enc); } catch (\Exception $e) { $vendor = ''; }
-
-            $days = null;
-            if (!empty($r->expiry_date)) {
-                $expiry = Carbon::parse($r->expiry_date);
-                $days = $expiry->gte($today)
-                    ? $today->diffInDays($expiry)
-                    : -$expiry->diffInDays($today);
+            if (!$recordType) {
+                return response()->json(['success' => false, 'message' => 'record_type is required'], 400);
             }
 
+            // =========================
+            // MODEL MAPPING
+            // =========================
+            $typeMap = [
+                1 => ['label' => 'Subscriptions', 'model' => Subscription::class],
+                2 => ['label' => 'SSL',           'model' => SSL::class],
+                3 => ['label' => 'Hosting',       'model' => Hosting::class],
+                4 => ['label' => 'Domains',       'model' => Domain::class],
+                5 => ['label' => 'Emails',        'model' => Email::class],
+                6 => ['label' => 'Counter',       'model' => Counter::class]
+            ];
+
+            if (!isset($typeMap[$recordType])) {
+                return response()->json(['success' => false, 'message' => 'Invalid record_type'], 400);
+            }
+
+            $moduleInfo = $typeMap[$recordType];
+            $typeLabel  = $moduleInfo['label'];
+            $modelClass = $moduleInfo['model'];
+
+            // =========================
+            // FETCH DATA WITH RELATIONS
+            // =========================
+            $relations = ['product', 'client', 'vendor'];
+            if ($recordType == 2) { $relations[] = 'domainInfo'; }
+            
+            $rows = $modelClass::with($relations)->orderBy('id', 'desc')->get();
+
+            if ($rows->isEmpty()) {
+                return response()->json(['success' => false, 'message' => 'No records found'], 404);
+            }
+
+            // =========================
+            // EXCEL INITIALIZATION
+            // =========================
+            $spreadsheet = new Spreadsheet();
+            $sheet = $spreadsheet->getActiveSheet();
+            $rowNo = 1;
+
+            $sheet->mergeCells("A$rowNo:Z$rowNo");
+            $sheet->setCellValue("A$rowNo", strtoupper($typeLabel) . ' REPORT');
+            $sheet->getStyle("A$rowNo")->getFont()->setBold(true)->setSize(14);
+            $sheet->getStyle("A$rowNo")->getAlignment()->setHorizontal(\PhpOffice\PhpSpreadsheet\Style\Alignment::HORIZONTAL_CENTER);
+            $rowNo += 2;
+
+            // =========================
+            // HEADERS SELECTION
+            // =========================
             switch ($recordType) {
-
-                case 1:
-                    $rowData = [
-                        $serial++, $product, $r->amount, $r->renewal_date,
-                        $r->expiry_date, $days,
-                        $r->status == 1 ? 'Active' : 'Deactive',
-                        $r->remarks, Carbon::parse($r->updated_at)->format('d M Y')
-                    ];
+                case 1: 
+                    $headers = ['S.No','Product Name','Client Name','Vendor Name','Amount','Renewal Date','Expiry Date','Days Left','Status','Remark','Last Updated']; 
                     break;
-
-                case 2:
-                    $rowData = [
-                        $serial++, $domain, $client, $product, $vendor,
-                        $r->amount, $r->renewal_date, $days,
-                        $r->status == 1 ? 'Active' : 'Deactive',
-                        $r->remarks, Carbon::parse($r->updated_at)->format('d M Y')
-                    ];
-                    break;
-
-                case 3:
-                    $rowData = [
-                        $serial++, $domain, $client, $product, $vendor,
-                        $r->valid_till, now()->toDateString(),
-                        $r->amount, $r->renewal_date, $days,
-                        $r->status == 1 ? 'Active' : 'Deactive',
-                        $r->remarks, Carbon::parse($r->updated_at)->format('d M Y')
-                    ];
-                    break;
-
-                case 4:
-                    $rowData = [
-                        $serial++, $domain, $client, $product, $vendor,
-                        $r->amount, $r->renewal_date, $days,
-                        $r->status == 1 ? 'Active' : 'Deactive',
-                        $r->remarks, $r->domain_protected,
-                        $r->deleted_at, Carbon::parse($r->updated_at)->format('d M Y')
-                    ];
-                    break;
-
-                case 5:
-                    $rowData = [
-                        $serial++, $domain, $client, $product, $vendor,
-                        $r->amount, $r->renewal_date, $days,
-                        $r->status == 1 ? 'Active' : 'Deactive',
-                        $r->remarks, $r->quantity, $r->bill_type,
-                        $r->start_date, Carbon::parse($r->updated_at)->format('d M Y')
-                    ];
-                    break;
-
-                case 6:
-                    $rowData = [
-                        $serial++, $domain, $client, $product, $vendor,
-                        $r->amount, $r->renewal_date, $days,
-                        $r->status == 1 ? 'Active' : 'Deactive',
-                        $r->remarks, Carbon::parse($r->updated_at)->format('d M Y')
-                    ];
+                default: 
+                    $headers = ['S.No','Domain Name','Client Name','Product Name','Vendor Name','Amount','Renewal Date','Days To Expire','Status','Remark','Last Updated']; 
                     break;
             }
 
-            $col = 'A';
-            foreach ($rowData as $val) {
-                $sheet->setCellValue($col . $rowNo, $val);
-                $col++;
+            $colChar = 'A';
+            foreach ($headers as $h) {
+                $sheet->setCellValue($colChar . $rowNo, $h);
+                $sheet->getStyle($colChar . $rowNo)->getFont()->setBold(true);
+                $colChar++;
             }
-
             $rowNo++;
+
+            // =========================
+            // FILL DATA ROWS
+            // =========================
+            $today  = Carbon::today();
+            $serial = 1;
+
+            foreach ($rows as $r) {
+                // Decrypt core fields
+                $pName = $r->product->name ?? 'N/A';
+                $cName = $r->client->name ?? 'N/A';
+                $vName = $r->vendor->name ?? 'N/A';
+                
+                try { $dec = CryptService::decryptData($pName); if($dec) $pName = $dec; } catch (\Exception $e) {}
+                try { $dec = CryptService::decryptData($cName); if($dec) $cName = $dec; } catch (\Exception $e) {}
+                
+                $domain = ($recordType == 2 && $r->domainInfo) ? $r->domainInfo->name : 'N/A';
+
+                $days = null;
+                if (!empty($r->renewal_date)) {
+                    $renewal = Carbon::parse($r->renewal_date);
+                    $days = (int)$today->diffInDays($renewal, false);
+                }
+
+                if ($recordType == 1) {
+                    $rowData = [
+                        $serial++, $pName, $cName, $vName, $r->amount, $r->renewal_date,
+                        $r->expiry_date ?? $r->renewal_date, $days,
+                        $r->status == 1 ? 'Active' : 'Inactive',
+                        $r->remarks, optional($r->updated_at)->format('d M Y') ?? '--'
+                    ];
+                } else {
+                    $rowData = [
+                        $serial++, $domain, $cName, $pName, $vName,
+                        $r->amount, $r->renewal_date, $days,
+                        $r->status == 1 ? 'Active' : 'Inactive',
+                        $r->remarks, optional($r->updated_at)->format('d M Y') ?? '--'
+                    ];
+                }
+
+                $colChar = 'A';
+                foreach ($rowData as $val) {
+                    $sheet->setCellValue($colChar . $rowNo, $val);
+                    $colChar++;
+                }
+                $rowNo++;
+            }
+
+            foreach (range('A', 'L') as $c) {
+                $sheet->getColumnDimension($c)->setAutoSize(true);
+            }
+
+            // =========================
+            // GENERATE FILE & SAVE
+            // =========================
+            $writer = new Xlsx($spreadsheet);
+            $filename = $typeLabel . '_Export_' . now()->format('Ymd_His') . '.xlsx';
+            
+            ob_start();
+            $writer->save('php://output');
+            $excelOutput = ob_get_clean();
+
+            // Save to local storage for History Box
+            $filePath = 'exports/' . $filename;
+            \Illuminate\Support\Facades\Storage::disk('local')->put($filePath, $excelOutput);
+
+            // Dynamically resolve User
+            $importedBy = 'System / Admin';
+            if (auth()->check()) {
+                $user = auth()->user();
+                $importedBy = $user->name ?? $user->email ?? ('User ID: ' . $user->id);
+                try { $dec = CryptService::decryptData($importedBy); if($dec) $importedBy = $dec; } catch (\Exception $e) {}
+            }
+
+            // Create History Record
+            $history = ImportHistory::create([
+                'module_name'     => $typeLabel,
+                'action'          => 'export',
+                'file_name'       => $filename,
+                'file_path'       => $filePath,
+                'imported_by'     => $importedBy,
+                'successful_rows' => count($rows),
+                'failed_rows'     => 0,
+                'duplicates_count'=> 0,
+            ]);
+
+            return response()->json([
+                'success' => true,
+                'message' => 'Export completed successfully',
+                'data' => [
+                    'filename' => $filename,
+                    'base64'   => base64_encode($excelOutput),
+                    'history'  => $history
+                ]
+            ]);
+
+        } catch (\Exception $e) {
+            \Illuminate\Support\Facades\Log::error("Excel Export Error: " . $e->getMessage(), ['trace' => $e->getTraceAsString()]);
+            return response()->json([
+                'success' => false,
+                'message' => 'Export failed: ' . $e->getMessage()
+            ], 500);
         }
-
-        foreach (range('A', 'Z') as $c) {
-            $sheet->getColumnDimension($c)->setAutoSize(true);
-        }
-
-        // =========================
-        // EXPORT + ACTIVITY
-        // =========================
-        $writer = new Xlsx($spreadsheet);
-        $filename = $typeLabel . '_Export_' . now()->format('His') . '.xlsx';
-
-        ob_start();
-        $writer->save('php://output');
-        $excelOutput = ob_get_clean();
-
-        DB::table('activities')->insert([
-            'action'    => CryptService::encryptData($typeLabel . ' Export'),
-            's_action'  => CustomCipherService::encryptData($typeLabel . ' Export'),
-            'user_id'   => $s_id,
-            'cat_id'    => null,
-            'message'   => CryptService::encryptData($typeLabel . ' records exported successfully'),
-            's_message' => CustomCipherService::encryptData($typeLabel . ' records exported successfully'),
-            'details'   => CryptService::encryptData(json_encode([
-                'record_type'   => $recordType,
-                'record_count' => count($rows),
-                'filename'     => $filename
-            ])),
-            'created_at' => now(),
-            'updated_at' => now(),
-        ]);
-
-        return response()->json([
-            'success' => true,
-            'data' => [
-                'filename' => $filename,
-                'base64'   => base64_encode($excelOutput)
-            ]
-        ]);
-
-    } catch (\Exception $e) {
-
-        return response()->json([
-            'success' => false,
-            'message' => 'Export failed',
-            'error'   => $e->getMessage()
-        ], 500);
     }
-}
 
 
 

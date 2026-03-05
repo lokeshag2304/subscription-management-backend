@@ -46,7 +46,8 @@ public function getAllActivities(Request $request)
                 WHEN sa.login_type = 3 THEN 'Client' 
                 ELSE 'Unknown' 
             END AS role")
-        );
+        )
+        ->whereNotNull('a.action'); // Skip legacy rows without action
 
     // Client login → sirf apni activities
     if (!empty($adminData) && $adminData->login_type == 3) {
@@ -101,8 +102,8 @@ public function getAllActivities(Request $request)
                 'creator_name'  => $creatorName, // ✅ NEW KEY
                 'login_type'    => $item->login_type,
                 'role'          => $item->role,
-                'created_at'    => Carbon::parse($item->created_at)->format('M d, Y h:i A'),
-                'updated_at'    => $item->updated_at,
+                'created_at'    => Carbon::parse($item->created_at)->format('j/n/Y, g:i:s a'),
+                'updated_at'    => Carbon::parse($item->updated_at)->format('j/n/Y, g:i:s a'),
             ];
         });
 
@@ -232,7 +233,12 @@ public function DeleteActivies(Request $request)
             ->get();
     
         return response()->json([
-            'rows' => $activities,
+            'rows' => $activities->map(function($item) {
+                $data = $item->toArray();
+                $data['created_at'] = Carbon::parse($item->created_at)->format('j/n/Y, g:i:s a');
+                $data['updated_at'] = Carbon::parse($item->updated_at)->format('j/n/Y, g:i:s a');
+                return $data;
+            }),
             'total' => $total
         ]);
     }
@@ -305,7 +311,12 @@ public function DeleteActivies(Request $request)
         ->get();
 
     return response()->json([
-        'rows' => $activities,
+        'rows' => $activities->map(function($item) {
+            $data = $item->toArray();
+            $data['created_at'] = Carbon::parse($item->created_at)->format('j/n/Y, g:i:s a');
+            $data['updated_at'] = Carbon::parse($item->updated_at)->format('j/n/Y, g:i:s a');
+            return $data;
+        }),
         'total' => $total
     ]);
 }

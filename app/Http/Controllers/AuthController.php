@@ -146,11 +146,46 @@ public function login(Request $request)
         return response()->json(['message' => 'Your account has been deactivated']);
     }
 
-    $passwordMatch = Hash::check($inputPassword, $matchedAdmin->password) || $inputPassword === $matchedAdmin->password;
+    // Password stored as plain text (change_password bug) OR bcrypt OR d_password
+    $passwordMatch = false;
+
+    // 1. Plain-text direct match (most common case given change_password stores plain text)
+    if ($inputPassword === $matchedAdmin->password) {
+        $passwordMatch = true;
+        // Auto-upgrade to bcrypt for security
+        DB::table('superadmins')
+            ->where('id', $matchedAdmin->id)
+            ->update(['password' => Hash::make($inputPassword), 'd_password' => $inputPassword]);
+    }
+
+    // 2. Bcrypt hash check (accounts that went through resetPassword)
+    if (!$passwordMatch) {
+        try {
+            if (password_get_info($matchedAdmin->password)['algo'] !== null) {
+                $passwordMatch = Hash::check($inputPassword, $matchedAdmin->password);
+            }
+        } catch (\Throwable $e) {
+            // Not a valid hash — already handled above
+        }
+    }
+
+    // 3. Fallback: check d_password (decrypted plain-text backup)
+    if (!$passwordMatch && !empty($matchedAdmin->d_password)) {
+        try {
+            $decryptedPass = CryptService::decryptData($matchedAdmin->d_password);
+            if ($inputPassword === $decryptedPass) {
+                $passwordMatch = true;
+                DB::table('superadmins')
+                    ->where('id', $matchedAdmin->id)
+                    ->update(['password' => Hash::make($inputPassword)]);
+            }
+        } catch (\Throwable $e) {}
+    }
 
     if (!$passwordMatch) {
         return response()->json(['message' => 'Invalid credentials']);
     }
+
 
     $token = Str::random(60);
     DB::table('superadmins')
@@ -223,7 +258,10 @@ public function two_step_otp(Request $request)
     $data = json_decode($request->getContent(), true);
     $contact = $data['contact'] ?? null;
     $otp_type = $data['method'] ?? null;
-    $otp = rand(1000, 9999);
+    $otp = (env('APP_ENV') === 'local' || env('APP_ENV') === 'development')
+        ? 1234       // Fixed OTP for local/dev — no real SMS/email needed
+        : rand(1000, 9999);
+
     $message = "";
 
     $superadmin = DB::table('superadmins')->where('id', $data['id'])->first();
