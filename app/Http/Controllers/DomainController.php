@@ -45,7 +45,7 @@ class DomainController extends Controller
         }
     }
 
-    private function logActivity($action, $record)
+    private function logActivity($action, $record, $oldData = null, $newData = null)
     {
         try {
             $label = ucfirst($action);
@@ -56,7 +56,12 @@ class DomainController extends Controller
             try { $domainName = \App\Services\CryptService::decryptData($domainName); } catch (\Exception $e) {}
 
             $details = "Domain: {$domainName} | Client: {$clientName} | Renewal: " . ($record->renewal_date ?? '-');
-            ActivityLogger::log(null, "Domain {$label}", $details, 'Domains');
+            
+            $actionType = $action === 'created' ? 'CREATE' : ($action === 'deleted' ? 'DELETE' : 'UPDATE');
+            if ($actionType === 'CREATE' && !$newData && $record) $newData = $record->toArray();
+            if ($actionType === 'DELETE' && !$oldData && $record) $oldData = $record->toArray();
+
+            ActivityLogger::logActivity(auth()->user(), $actionType, 'Domains', 'domains', $record->id, $oldData, $newData, "Domain {$label}", request());
         } catch (\Exception $e) {}
     }
 
@@ -172,27 +177,32 @@ class DomainController extends Controller
         if (!empty($search)) {
             $searchLow = strtolower($search);
             
-            $pIds = \App\Models\Product::all()->filter(function($p) use ($searchLow) {
-                $dec = \App\Services\CryptService::decryptData($p->name);
-                return str_contains(strtolower($dec ?? $p->name), $searchLow);
-            })->pluck('id');
+            // Only search relevant domains if a client scope is active
+            $dQuery = \App\Models\Domain::query();
+            ClientScopeService::applyScope($dQuery, $request);
+            $dIds = $dQuery->select(['id', 'name'])->get()
+                ->filter(function($d) use ($searchLow) {
+                    $dec = \App\Services\CryptService::decryptData($d->name);
+                    return str_contains(strtolower($dec ?? $d->name), $searchLow);
+                })->pluck('id');
 
-            $cIds = \App\Models\Superadmin::all()->filter(function($c) use ($searchLow) {
-                $dec = \App\Services\CryptService::decryptData($c->name);
-                return str_contains(strtolower($dec ?? $c->name), $searchLow);
-            })->pluck('id');
+            $pIds = \App\Models\Product::pluck('name', 'id')
+                ->filter(function($name) use ($searchLow) {
+                    $dec = \App\Services\CryptService::decryptData($name);
+                    return str_contains(strtolower($dec ?? $name), $searchLow);
+                })->keys();
 
-            $vIds = \App\Models\Vendor::all()->filter(function($v) use ($searchLow) {
-                $dec = \App\Services\CryptService::decryptData($v->name);
-                return str_contains(strtolower($dec ?? $v->name), $searchLow);
-            })->pluck('id');
+            $cIds = \App\Models\Superadmin::pluck('name', 'id')
+                ->filter(function($name) use ($searchLow) {
+                    $dec = \App\Services\CryptService::decryptData($name);
+                    return str_contains(strtolower($dec ?? $name), $searchLow);
+                })->keys();
 
-            // Searching Domain Name (this can be slow if there are many domains, 
-            // but usually domains are manageable per client)
-            $dIds = Domain::all()->filter(function($d) use ($searchLow) {
-                $dec = \App\Services\CryptService::decryptData($d->name);
-                return str_contains(strtolower($dec ?? $d->name), $searchLow);
-            })->pluck('id');
+            $vIds = \App\Models\Vendor::pluck('name', 'id')
+                ->filter(function($name) use ($searchLow) {
+                    $dec = \App\Services\CryptService::decryptData($name);
+                    return str_contains(strtolower($dec ?? $name), $searchLow);
+                })->keys();
 
             $query->where(function($q) use ($pIds, $cIds, $vIds, $dIds) {
                 $q->whereIn('product_id', $pIds)
@@ -301,7 +311,18 @@ class DomainController extends Controller
             $days_left = $renewalDate ? $today->diffInDays($renewalDate, false) : null;
             $days_to_delete = $deletionDate ? $today->diffInDays($deletionDate, false) : null;
 
-            $encryptedName = \App\Services\CryptService::encryptData($request->name ?? $request->domain_name);
+            $domainName = $request->name ?? $request->domain_name;
+            $encryptedName = \App\Services\CryptService::encryptData($domainName);
+
+            // =========================
+            // CHECK FOR DUPLICATES (Fast DB Check)
+            // =========================
+            if (Domain::where('name', $encryptedName)->exists()) {
+                return response()->json([
+                    'success' => false,
+                    'message' => $domainName . ' already exists in the system.',
+                ], 409);
+            }
 
             // STEP 5 — STANDARD CREATE LOGIC
             $model = Domain::create([
@@ -380,6 +401,24 @@ class DomainController extends Controller
             if ($value === '') $data[$key] = null;
         }
 
+        // =========================
+        // CHECK FOR DUPLICATES (Fast DB Check)
+        // =========================
+        $newName = $data['name'] ?? $data['domain_name'] ?? null;
+        if ($newName) {
+            $encryptedName = \App\Services\CryptService::encryptData($newName);
+            $duplicateExists = Domain::where('name', $encryptedName)
+                ->where('id', '!=', $id)
+                ->exists();
+                
+            if ($duplicateExists) {
+                return response()->json([
+                    'success' => false,
+                    'message' => $newName . ' already exists in the system.',
+                ], 409);
+            }
+        }
+
         if (isset($data['expiry_date']) && !isset($data['renewal_date'])) {
             $data['renewal_date'] = $data['expiry_date'];
         }
@@ -399,6 +438,7 @@ class DomainController extends Controller
             $record->name = \App\Services\CryptService::encryptData($data['name'] ?? $data['domain_name']);
         }
 
+        $oldData = clone $record;
         $record->update([
             'name'             => $record->name, // use the value we just set if any
             'product_id'       => $data['product_id'] ?? $record->product_id,
@@ -428,7 +468,7 @@ class DomainController extends Controller
         
         $record->expiry_date  = $record->renewal_date;
         $record->has_remark_history = $record->remark_histories_count > 0;
-        $this->logActivity('updated', $record);
+        $this->logActivity('updated', $record, $oldData->toArray(), $record->toArray());
 
         $resp = $record->toArray();
         $resp['client_name']  = $record->client_name;

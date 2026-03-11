@@ -18,6 +18,9 @@ class Hosting extends Model
         'product_id',
         'client_id',
         'vendor_id',
+        'domain_id',
+        'bill_type',
+        'start_date',
         'amount',
         'renewal_date',
         'deletion_date',
@@ -26,6 +29,11 @@ class Hosting extends Model
         'status',
         'remarks',
     ];
+
+    public function domainInfo()
+    {
+        return $this->belongsTo(Domain::class, 'domain_id');
+    }
 
     public function product()
     {

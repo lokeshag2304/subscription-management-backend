@@ -230,10 +230,20 @@ abstract class SmartImporter implements ToCollection, WithChunkReading
                 }
             }
         }
+    }
 
-        if (!empty($this->duplicateRows)) {
-            $this->duplicateFile = $this->exportDuplicates();
+    /**
+     * Finalize the import: Export collected duplicates to a file.
+     * This should be called AFTER Excel::import() completes.
+     */
+    public function finalizeImport(): ?string
+    {
+        if (empty($this->duplicateRows)) {
+            return null;
         }
+
+        $this->duplicateFile = $this->exportDuplicates();
+        return $this->duplicateFile;
     }
 
     // ── Duplicate export ───────────────────────────────────────────────────────
@@ -360,7 +370,7 @@ abstract class SmartImporter implements ToCollection, WithChunkReading
             $data['email']         = strtolower(preg_replace('/[^a-zA-Z0-9]+/', '.', $name)) . '+' . uniqid() . '@import.local';
             $data['password']      = bcrypt(uniqid());
             $data['status']        = 1;
-            $data['login_type']    = 1;
+            $data['login_type']    = 3; // 3 = Client
             $data['two_step_auth'] = 1;
         }
 

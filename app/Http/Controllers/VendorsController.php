@@ -34,6 +34,24 @@ public function storeVendors(Request $request)
         }
 
         // =========================
+        // CHECK FOR DUPLICATES
+        // =========================
+        $allVendors = DB::table('vendors')->get();
+        foreach ($allVendors as $v) {
+            try {
+                $decName = CryptService::decryptData($v->name);
+            } catch (\Exception $e) {
+                $decName = $v->name;
+            }
+            if (strtolower(trim($decName)) === strtolower(trim($vendorName))) {
+                return response()->json([
+                    'success' => false,
+                    'message' => $vendorName . ' already exist in the vendor.',
+                ], 409);
+            }
+        }
+
+        // =========================
         // ENCRYPT VENDOR NAME
         // =========================
         $encryptedName = CryptService::encryptData($vendorName);
@@ -104,6 +122,22 @@ public function updateVendors(Request $request)
             'success' => false,
             'message' => 'Vendor not found', // Changed message
         ], 404);
+    }
+
+    $allVendors = DB::table('vendors')->get();
+    foreach ($allVendors as $v) {
+        if ($v->id == $vendorId) continue;
+        try {
+            $decName = CryptService::decryptData($v->name);
+        } catch (\Exception $e) {
+            $decName = $v->name;
+        }
+        if (strtolower(trim($decName)) === strtolower(trim($newName))) {
+            return response()->json([
+                'success' => false,
+                'message' => $newName . ' already exist in the vendor.',
+            ], 409);
+        }
     }
 
     // Decrypt old name

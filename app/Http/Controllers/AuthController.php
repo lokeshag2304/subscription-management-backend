@@ -124,7 +124,7 @@ public function login(Request $request)
     $inputPassword = $data['password'];
 
     $superadmins = DB::table('superadmins')
-        ->select('id', 'email', 'password', 'login_type', 'name', 'profile', 'status', 'subadmin_id')
+        ->select('id', 'email', 'password', 'login_type', 'name', 'profile', 'status', 'subadmin_id', 'otp_enabled')
         ->get();
 
     $matchedAdmin = null;
@@ -187,7 +187,19 @@ public function login(Request $request)
     }
 
 
-    $token = Str::random(60);
+    // Generate JWT token
+    $customClaims = [
+        'sub' => $matchedAdmin->id,
+        'email' => $matchedAdmin->email, 
+        'login_type' => $matchedAdmin->login_type,
+        'subadmin_id' => $matchedAdmin->login_type == 2 ? $matchedAdmin->subadmin_id : null,
+        'iat' => Carbon::now()->timestamp,
+        'exp' => Carbon::now()->addDays(30)->timestamp,
+    ];
+
+    $payload = JWTFactory::customClaims($customClaims)->make();
+    $token = JWTAuth::encode($payload)->get();
+
     DB::table('superadmins')
         ->where('id', $matchedAdmin->id)
         ->update(['auth_token' => $token]);
@@ -225,6 +237,9 @@ public function login(Request $request)
         ]);
     }
 
+    // Is OTP enabled for this specific user? (Default to true if column not found)
+    $isOtpRequired = (isset($matchedAdmin->otp_enabled) && $matchedAdmin->otp_enabled == 0) ? false : true;
+
     return response()->json([
         'status' => true,
         'message' => 'Login successful',
@@ -235,15 +250,15 @@ public function login(Request $request)
         'profile' => $decryptedProfile,
         'logo' => $setting->logo,
         'favicon' => $setting->favicon,
-        'whatsapp_status' => $setting->whatsapp_status,
-        'email_status' => $setting->email_status,
-        'sms_status' => $setting->sms_status,
+        'whatsapp_status' => $isOtpRequired ? $setting->whatsapp_status : 0,
+        'email_status' => $isOtpRequired ? $setting->email_status : 0,
+        'sms_status' => $isOtpRequired ? $setting->sms_status : 0,
 
         // Role mapping
         'role' => [
             1 => 'SuperAdmin',
-            2 => 'User',
-            3 => 'Client'
+            2 => 'UserAdmin',
+            3 => 'ClientAdmin'
         ][$matchedAdmin->login_type] ?? 'Unknown',
 
         'subadmin_id' => $matchedAdmin->login_type == 2 ? $matchedAdmin->subadmin_id : null
@@ -368,10 +383,21 @@ Your OTP for the Subscription portal is {1}. Please do not share it with anyone.
     $user = DB::table('superadmins') 
         ->where('id', $id)
         ->where('otp', $otp)
-        ->select('id', 'name', 'email', 'number', 'profile', 'two_step_auth', 'login_type')
+        ->select('id', 'name', 'email', 'number', 'profile', 'two_step_auth', 'login_type', 'otp_expiry')
         ->first();
 
     if (!empty($user)) {
+        // OTP Expiry Check (5 minute window)
+        if (!empty($user->otp_expiry)) {
+            $expiryTime = Carbon::parse($user->otp_expiry);
+            if (Carbon::now()->greaterThan($expiryTime)) {
+                return response()->json([
+                    "status" => false,
+                    "message" => "OTP expired! Please request a new OTP."
+                ]);
+            }
+        }
+
         // ✅ Decrypt the values
         $user->name = CryptService::decryptData($user->name);
         $user->email = CryptService::decryptData($user->email);
@@ -383,7 +409,9 @@ Your OTP for the Subscription portal is {1}. Please do not share it with anyone.
         DB::table('superadmins')
             ->where('id', $user->id)
             ->update([
-                'forget_string' => $forget_string
+                'forget_string' => $forget_string,
+                'otp' => null,
+                'otp_expiry' => null
             ]);
 
         return response()->json([
@@ -631,42 +659,61 @@ public function sendResetLink(Request $request)
     public function send_sms_otp()
 {
     $request = json_decode(request()->getContent(), true);
-    $plainMobile = $request['number'];
+    $plainMobile = preg_replace('/\s+/', '', $request['number'] ?? '');
+    $plainEmail = $request['email'] ?? '';
     $smsCode = $request['sms_code'] ?? '';
 
+    if (empty($plainEmail) || empty($plainMobile)) {
+        return response()->json([
+            "status" => false,
+            "message" => "Verification failed."
+        ]);
+    }
+
     $encryptedMobile = CryptService::encryptData($plainMobile);
+    $encryptedEmail = CryptService::encryptData($plainEmail);
 
     $user = DB::table('superadmins')
-        ->where('number', $encryptedMobile)
+        ->where(function ($query) use ($encryptedMobile, $plainMobile) {
+            $query->where('number', $encryptedMobile)
+                  ->orWhere('number', $plainMobile);
+        })
+        ->where(function ($query) use ($encryptedEmail, $plainEmail) {
+            $query->where('email', $encryptedEmail)
+                  ->orWhere('email', $plainEmail);
+        })
         ->first(); 
 
-    $setting = DB::table("setting")->first(); 
-
     if (!empty($user)) {
-        $otp = rand(1000, 9999);
-        // $otp = "1234"; // for testing
+        try {
+            $otp = random_int(100000, 999999);
+        } catch (\Exception $e) {
+            $otp = mt_rand(100000, 999999);
+        }
 
         $decryptedNumber = CryptService::decryptData($user->number);
         $mobile = $smsCode . $decryptedNumber;
-        $last_three = Str::substr($decryptedNumber, -3);
 
-        $this->sendSMSOtp($otp, $mobile);
+        $SMSInteg = new \App\Lib\SMSinteg();
+        $sms_msg = "Your password reset OTP is: {$otp}. Valid for 5 minutes.";
+        $SMSInteg->SendOTPNotification($mobile, $sms_msg);
 
         DB::table('superadmins')
             ->where('id', $user->id)
-            ->update(['otp' => $otp]);
-
-        $message = "We have sent an OTP on your registered mobile number *******" . $last_three . " successfully";
+            ->update([
+                'otp' => $otp,
+                'otp_expiry' => \Carbon\Carbon::now()->addMinutes(5)
+            ]);
 
         return response()->json([
             "status" => true,
-            "message" => $message,
+            "message" => "OTP sent successfully.",
             "Data" => $user,
         ]);
     } else {
         return response()->json([
             "status" => false,
-            "message" => "Mobile Number does not exist in records"
+            "message" => "Verification failed."
         ]);
     }
 }
@@ -674,46 +721,61 @@ public function sendResetLink(Request $request)
    public function send_whatsap_otp()
 {
     $request = json_decode(request()->getContent(), true);
-    $plainMobile = $request['number'];
+    $plainMobile = preg_replace('/\s+/', '', $request['number'] ?? '');
+    $plainEmail = $request['email'] ?? '';
     $whatsappCode = $request['whatsapp_code'] ?? '';
 
-    // ✅ Encrypt number for DB match
+    if (empty($plainEmail) || empty($plainMobile)) {
+        return response()->json([
+            "status" => false,
+            "message" => "Verification failed."
+        ]);
+    }
+
     $encryptedMobile = CryptService::encryptData($plainMobile);
+    $encryptedEmail = CryptService::encryptData($plainEmail);
     
     $user = DB::table('superadmins')
-        ->where('number', $encryptedMobile)
+        ->where(function ($query) use ($encryptedMobile, $plainMobile) {
+            $query->where('number', $encryptedMobile)
+                  ->orWhere('number', $plainMobile);
+        })
+        ->where(function ($query) use ($encryptedEmail, $plainEmail) {
+            $query->where('email', $encryptedEmail)
+                  ->orWhere('email', $plainEmail);
+        })
         ->first(); 
 
-    $setting = DB::table("setting")->first(); 
-
     if (!empty($user)) {
-        $otp = rand(1000, 9999);
-        // $otp = "1234"; // testing
+        try {
+            $otp = random_int(100000, 999999);
+        } catch (\Exception $e) {
+            $otp = mt_rand(100000, 999999);
+        }
 
-        // ✅ Decrypt number for use
         $decryptedNumber = CryptService::decryptData($user->number);
         $mobile = $whatsappCode . $decryptedNumber;
-        $last_three = Str::substr($decryptedNumber, -3);
 
-        // ✅ Send WhatsApp OTP
-        $this->sendOtp($otp, $mobile);
+        $WhatsappInteg = new \App\Lib\Whatsappinteg();
+        $msg = "Your FlyingStars password reset OTP is: {$otp}";
+        $WhatsappInteg->SendNotificationOTP($mobile, $msg, 'false');
 
-        // ✅ Store OTP
         DB::table('superadmins')
             ->where('id', $user->id)
-            ->update(['otp' => $otp]);
-
-        $message = "We have sent an OTP on your registered mobile number *******" . $last_three . " successfully";
+            ->update([
+                'otp' => $otp,
+                'otp_expiry' => \Carbon\Carbon::now()->addMinutes(5)
+            ]);
 
         return response()->json([
             "status" => true,
-            "message" => $message,
+            "message" => "OTP sent successfully.",
             "Data" => $user,
         ]);
     } else {
         return response()->json([
             "status" => false,
-            "message" => "Mobile Number does not exist in records"
+            "message" => "Verification failed."
         ]);
     }
 }

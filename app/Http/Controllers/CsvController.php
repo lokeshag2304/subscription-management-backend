@@ -185,6 +185,14 @@ class CsvController extends Controller
                 'duplicates_count'=> 0,
             ]);
 
+            // Log to Activity Trail — resolve user same way as SubscriptionController
+            $activityUser = auth()->user() ?? (object)['id' => $data['s_id'] ?? null];
+            \App\Services\ActivityLogger::exported(
+                isset($activityUser->id) ? (int) $activityUser->id : null,
+                $typeLabel,
+                count($rows)
+            );
+
             return response()->json([
                 'success' => true,
                 'message' => 'Export completed successfully',

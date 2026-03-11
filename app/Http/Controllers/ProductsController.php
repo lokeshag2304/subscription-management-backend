@@ -31,6 +31,21 @@ class ProductsController extends Controller
         ], 422);
     }
 
+    $allProducts = DB::table('products')->get();
+    foreach ($allProducts as $p) {
+        try {
+            $decName = CryptService::decryptData($p->name);
+        } catch (\Exception $e) {
+            $decName = $p->name;
+        }
+        if (strtolower(trim($decName)) === strtolower(trim($domainName))) {
+            return response()->json([
+                'success' => false,
+                'message' => $domainName . ' already exist in the product.',
+            ], 409);
+        }
+    }
+
     $encryptedName = CryptService::encryptData($domainName);
 
     $ProductID = DB::table('products')->insertGetId([
@@ -82,6 +97,22 @@ public function updateProducts(Request $request)
             'success' => false,
             'message' => 'Domain not found',
         ], 404);
+    }
+
+    $allProducts = DB::table('products')->get();
+    foreach ($allProducts as $p) {
+        if ($p->id == $domainId) continue;
+        try {
+            $decName = CryptService::decryptData($p->name);
+        } catch (\Exception $e) {
+            $decName = $p->name;
+        }
+        if (strtolower(trim($decName)) === strtolower(trim($newName))) {
+            return response()->json([
+                'success' => false,
+                'message' => $newName . ' already exist in the product.',
+            ], 409);
+        }
     }
 
     // Decrypt old name

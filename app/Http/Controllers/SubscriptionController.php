@@ -35,21 +35,24 @@ class SubscriptionController extends Controller
 
         if (!empty($search)) {
             $searchLow = strtolower($search);
-            // Search inside Products, Vendors, Clients once (these are small tables)
-            $pIds = \App\Models\Product::all()->filter(function($p) use ($searchLow) {
-                $dec = \App\Services\CryptService::decryptData($p->name);
-                return str_contains(strtolower($dec ?? $p->name), $searchLow);
-            })->pluck('id');
+            
+            $pIds = \App\Models\Product::pluck('name', 'id')
+                ->filter(function($name) use ($searchLow) {
+                    $dec = \App\Services\CryptService::decryptData($name);
+                    return str_contains(strtolower($dec ?? $name), $searchLow);
+                })->keys();
 
-            $cIds = \App\Models\Superadmin::all()->filter(function($c) use ($searchLow) {
-                $dec = \App\Services\CryptService::decryptData($c->name);
-                return str_contains(strtolower($dec ?? $c->name), $searchLow);
-            })->pluck('id');
+            $cIds = \App\Models\Superadmin::pluck('name', 'id')
+                ->filter(function($name) use ($searchLow) {
+                    $dec = \App\Services\CryptService::decryptData($name);
+                    return str_contains(strtolower($dec ?? $name), $searchLow);
+                })->keys();
 
-            $vIds = \App\Models\Vendor::all()->filter(function($v) use ($searchLow) {
-                $dec = \App\Services\CryptService::decryptData($v->name);
-                return str_contains(strtolower($dec ?? $v->name), $searchLow);
-            })->pluck('id');
+            $vIds = \App\Models\Vendor::pluck('name', 'id')
+                ->filter(function($name) use ($searchLow) {
+                    $dec = \App\Services\CryptService::decryptData($name);
+                    return str_contains(strtolower($dec ?? $name), $searchLow);
+                })->keys();
 
             $query->where(function($q) use ($pIds, $cIds, $vIds) {
                 $q->whereIn('product_id', $pIds)
@@ -145,6 +148,14 @@ class SubscriptionController extends Controller
             ]);
 
             try {
+                // Compute days_left and days_to_delete server-side
+                $today = now()->startOfDay();
+                $computedDaysLeft = $request->renewal_date
+                    ? $today->diffInDays(\Carbon\Carbon::parse($request->renewal_date)->startOfDay(), false)
+                    : null;
+                $computedDaysToDelete = $request->deletion_date
+                    ? $today->diffInDays(\Carbon\Carbon::parse($request->deletion_date)->startOfDay(), false)
+                    : null;
 
                 $subscription = Subscription::create([
                     'product_id' => $request->product_id,
@@ -153,8 +164,8 @@ class SubscriptionController extends Controller
                     'amount' => $request->amount,
                     'renewal_date' => $request->renewal_date,
                     'deletion_date' => $request->deletion_date,
-                    'days_left' => $request->days_left,
-                    'days_to_delete' => $request->days_to_delete,
+                    'days_left' => $computedDaysLeft,
+                    'days_to_delete' => $computedDaysToDelete,
                     'status' => $request->status ?? 1,
                     'remarks' => \App\Services\CryptService::encryptData($request->remarks)
                 ]);
@@ -171,17 +182,27 @@ class SubscriptionController extends Controller
                 $data['client_name']  = $cName;
                 $data['vendor_name']  = $vName;
                 $data['remarks'] = \App\Services\CryptService::decryptData($subscription->remarks);
-                $data['has_remark_history'] = $subscription->remark_histories_count > 0;
+                $data['has_remark_history'] = false;
                 $data['last_updated'] = DateFormatterService::format($subscription->updated_at);
                 $data['updated_at_formatted'] = DateFormatterService::format($subscription->updated_at);
                 $data['created_at_formatted'] = DateFormatterService::format($subscription->created_at);
-                // updated_at / created_at kept as raw ISO from toArray() — do NOT overwrite
-
-                ActivityLogger::added(
-                    $request->input('s_id') ?? null,
+                // Ensure computed values are in the response (toArray() should have them but be explicit)
+                $data['days_left']     = $computedDaysLeft;
+                $data['days_to_delete'] = $computedDaysToDelete;
+                ActivityLogger::logActivity(
+                    auth()->user() ?? (object)['id' => $request->input('s_id') ?? null],
+                    'CREATE',
                     'Subscription',
-                    "Product: {$pName} | Client: {$cName} | Amount: {$subscription->amount} | Renewal: {$subscription->renewal_date}"
+                    'subscriptions',
+                    $subscription->id,
+                    null,
+                    $subscription->toArray(),
+                    "Subscription created",
+                    $request
                 );
+
+                // AUTOMATIC COUNTER SYNC
+                \App\Services\CounterSyncService::sync($subscription->client_id, $subscription->product_id, $subscription->vendor_id);
 
                 return response()->json([
                     'status' => true,
@@ -230,6 +251,18 @@ class SubscriptionController extends Controller
                 $data['remarks'] = \App\Services\CryptService::encryptData($data['remarks']);
             }
 
+            // Compute and persist days_left / days_to_delete
+            $today = now()->startOfDay();
+            $renewalDate = !empty($data['renewal_date']) ? $data['renewal_date'] : $record->renewal_date;
+            $deletionDate = !empty($data['deletion_date']) ? $data['deletion_date'] : $record->deletion_date;
+            $data['days_left'] = $renewalDate
+                ? $today->diffInDays(\Illuminate\Support\Carbon::parse($renewalDate)->startOfDay(), false)
+                : null;
+            $data['days_to_delete'] = $deletionDate
+                ? $today->diffInDays(\Illuminate\Support\Carbon::parse($deletionDate)->startOfDay(), false)
+                : null;
+
+            $oldData = $record->toArray();
             $record->update($data);
             $record->refresh()->load(['product', 'client', 'vendor'])->loadCount('remarkHistories');
             
@@ -249,13 +282,32 @@ class SubscriptionController extends Controller
             $resp['last_updated'] = DateFormatterService::format($record->updated_at);
             $resp['updated_at_formatted'] = DateFormatterService::format($record->updated_at);
             $resp['created_at_formatted'] = DateFormatterService::format($record->created_at);
-            // updated_at / created_at kept as raw ISO from toArray() — do NOT overwrite
+            $resp['status'] = $record->status;
 
-            ActivityLogger::updated(
-                $request->input('s_id') ?? null,
+            // Compute days_left and days_to_delete dynamically
+            $today = now()->startOfDay();
+            $resp['days_left'] = $record->renewal_date
+                ? $today->diffInDays(\Illuminate\Support\Carbon::parse($record->renewal_date)->startOfDay(), false)
+                : null;
+            $resp['days_to_delete'] = $record->deletion_date
+                ? $today->diffInDays(\Illuminate\Support\Carbon::parse($record->deletion_date)->startOfDay(), false)
+                : null;
+
+            ActivityLogger::logActivity(
+                auth()->user() ?? (object)['id' => $request->input('s_id') ?? null],
+                'UPDATE',
                 'Subscription',
-                "Product: {$pName} | Client: {$cName} | Amount: {$record->amount} | Renewal: {$record->renewal_date}"
+                'subscriptions',
+                $record->id,
+                $oldData,
+                $record->toArray(),
+                "Subscription updated",
+                $request
             );
+
+            // AUTOMATIC COUNTER SYNC (for both old and new to handle transfers)
+            \App\Services\CounterSyncService::sync($oldData['client_id'], $oldData['product_id'], $oldData['vendor_id']);
+            \App\Services\CounterSyncService::sync($record->client_id, $record->product_id, $record->vendor_id);
 
             return response()->json([
                 'status' => true,
@@ -322,6 +374,11 @@ class SubscriptionController extends Controller
 
             if ($inserted > 0) {
                 ActivityLogger::imported(null, 'Subscription', $inserted);
+                
+                // AUTOMATIC COUNTER SYNC for bulk imports
+                foreach ($latest as $sub) {
+                    \App\Services\CounterSyncService::sync($sub->client_id, $sub->product_id, $sub->vendor_id);
+                }
             }
 
             return response()->json([
@@ -355,8 +412,24 @@ class SubscriptionController extends Controller
         // ── OWNERSHIP GUARD ──
         ClientScopeService::assertOwnership($record, $request);
 
-        ActivityLogger::deleted(null, 'Subscription', "Subscription ID #{$record->id} deleted | Renewal: {$record->renewal_date}");
+        ActivityLogger::logActivity(
+            auth()->user() ?? (object)['id' => $request->input('s_id') ?? null],
+            'DELETE',
+            'Subscription',
+            'subscriptions',
+            $record->id,
+            $record->toArray(),
+            null,
+            $request
+        );
+        $oldClient = $record->client_id;
+        $oldProduct = $record->product_id;
+        $oldVendor = $record->vendor_id;
+
         $record->delete();
+
+        // AUTOMATIC COUNTER SYNC after deletion
+        \App\Services\CounterSyncService::sync($oldClient, $oldProduct, $oldVendor);
         return response()->json([
             'status' => true,
             'success' => true, 

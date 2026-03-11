@@ -54,13 +54,18 @@ class ImportService
         // ── 3. MAIN IMPORT — runs first, always completes ─────────────────────
         Excel::import($importer, $file);
 
+        // ── 3.5. FINALIZE (Export duplicates if any) ─────────────────────────
+        $duplicateFilePath = null;
+        if (method_exists($importer, 'finalizeImport')) {
+            $duplicateFilePath = $importer->finalizeImport();
+        }
+
         // All counters are now settled on $importer
         $inserted   = $importer->inserted   ?? 0;
         $duplicates = $importer->duplicates ?? 0;
         $failed     = $importer->failed     ?? 0;
         $totalRows  = $importer->totalRows  ?? ($inserted + $duplicates + $failed);
 
-        $duplicateFilePath = $importer->duplicateFile ?? null;
         $duplicateFileUrl  = $duplicateFilePath
             ? url('/api/import-logs/download/' . ltrim($duplicateFilePath, '/'))
             : null;

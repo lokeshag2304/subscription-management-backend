@@ -45,7 +45,7 @@ class SSLController extends Controller
         }
     }
 
-    private function logActivity($action, $record)
+    private function logActivity($action, $record, $oldData = null, $newData = null)
     {
         try {
             $module = 'SSL';
@@ -53,7 +53,12 @@ class SSLController extends Controller
             $domainName = $record->domain_name ?? $record->id;
             $clientName = $record->client_name ?? 'N/A';
             $details = "Domain: {$domainName} | Client: {$clientName} | Renewal: " . ($record->renewal_date ?? '-');
-            ActivityLogger::log(null, "SSL {$label}", $details, $module);
+            
+            $actionType = $action === 'created' ? 'CREATE' : ($action === 'deleted' ? 'DELETE' : 'UPDATE');
+            if ($actionType === 'CREATE' && !$newData && $record) $newData = is_array($record) ? $record : ((is_object($record) && method_exists($record, 'toArray')) ? $record->toArray() : (array)$record);
+            if ($actionType === 'DELETE' && !$oldData && $record) $oldData = is_array($record) ? $record : ((is_object($record) && method_exists($record, 'toArray')) ? $record->toArray() : (array)$record);
+
+            ActivityLogger::logActivity(auth()->user(), $actionType, $module, 's_s_l_s', $record->id ?? null, $oldData, $newData, "SSL {$label}", request());
         } catch (\Exception $e) {}
     }
 
@@ -82,25 +87,32 @@ class SSLController extends Controller
         if (!empty($search)) {
             $searchLow = strtolower($search);
             
-            $pIds = \App\Models\Product::all()->filter(function($p) use ($searchLow) {
-                $dec = \App\Services\CryptService::decryptData($p->name);
-                return str_contains(strtolower($dec ?? $p->name), $searchLow);
-            })->pluck('id');
+            // Only search relevant domains if a client scope is active
+            $dQuery = \App\Models\Domain::query();
+            ClientScopeService::applyScope($dQuery, $request);
+            $dIds = $dQuery->select(['id', 'name'])->get()
+                ->filter(function($d) use ($searchLow) {
+                    $dec = \App\Services\CryptService::decryptData($d->name);
+                    return str_contains(strtolower($dec ?? $d->name), $searchLow);
+                })->pluck('id');
 
-            $cIds = \App\Models\Superadmin::all()->filter(function($c) use ($searchLow) {
-                $dec = \App\Services\CryptService::decryptData($c->name);
-                return str_contains(strtolower($dec ?? $c->name), $searchLow);
-            })->pluck('id');
+            $pIds = \App\Models\Product::pluck('name', 'id')
+                ->filter(function($name) use ($searchLow) {
+                    $dec = \App\Services\CryptService::decryptData($name);
+                    return str_contains(strtolower($dec ?? $name), $searchLow);
+                })->keys();
 
-            $vIds = \App\Models\Vendor::all()->filter(function($v) use ($searchLow) {
-                $dec = \App\Services\CryptService::decryptData($v->name);
-                return str_contains(strtolower($dec ?? $v->name), $searchLow);
-            })->pluck('id');
+            $cIds = \App\Models\Superadmin::pluck('name', 'id')
+                ->filter(function($name) use ($searchLow) {
+                    $dec = \App\Services\CryptService::decryptData($name);
+                    return str_contains(strtolower($dec ?? $name), $searchLow);
+                })->keys();
 
-            $dIds = \App\Models\Domain::all()->filter(function($d) use ($searchLow) {
-                $dec = \App\Services\CryptService::decryptData($d->name);
-                return str_contains(strtolower($dec ?? $d->name), $searchLow);
-            })->pluck('id');
+            $vIds = \App\Models\Vendor::pluck('name', 'id')
+                ->filter(function($name) use ($searchLow) {
+                    $dec = \App\Services\CryptService::decryptData($name);
+                    return str_contains(strtolower($dec ?? $name), $searchLow);
+                })->keys();
 
             $query->where(function($q) use ($pIds, $cIds, $vIds, $dIds) {
                 $q->whereIn('product_id', $pIds)
@@ -356,6 +368,7 @@ class SSLController extends Controller
             $data['remarks'] = \App\Services\CryptService::encryptData($data['remarks']);
         }
 
+        $oldData = clone $record;
         $record->update($data);
 
         // Sync client_id to the domain table so derived relations work
@@ -403,7 +416,7 @@ class SSLController extends Controller
         $resp['created_at_formatted'] = DateFormatterService::format($record->created_at);
         // updated_at / created_at kept as raw ISO from toArray() — do NOT overwrite
 
-        $this->logActivity('updated', $record);
+        $this->logActivity('updated', $record, $oldData->toArray(), $record->toArray());
 
         return response()->json([
             'status'  => true,

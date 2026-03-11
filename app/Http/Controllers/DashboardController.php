@@ -174,10 +174,14 @@ public function GetDashboardData(Request $request)
         $hostingCount = $hostQ->count();
 
         // 4. Domains
-        $domQ = DB::table('domain');
-        if ($scopedClientId !== null) $domQ->where('client_id', $scopedClientId);
-        if ($applyDateFilter) $domQ->whereBetween('created_at', [$startDate, $endDate]);
-        $domainsCount = $domQ->count();
+        if ($isClient) {
+             $domainsCount = count($clientDomainIds);
+        } else {
+            $domQ = DB::table('domain');
+            if ($scopedClientId !== null) $domQ->where('client_id', $scopedClientId);
+            if ($applyDateFilter) $domQ->whereBetween('created_at', [$startDate, $endDate]);
+            $domainsCount = $domQ->count();
+        }
 
         // 5. Emails
         $emailQ = DB::table('emails');
@@ -196,6 +200,7 @@ public function GetDashboardData(Request $request)
             ['type_id' => 2, 'type_name' => 'SSL',           'count' => $sslCount],
             ['type_id' => 3, 'type_name' => 'Hosting',       'count' => $hostingCount],
             ['type_id' => 4, 'type_name' => 'Domains',       'count' => $domainsCount],
+            ['type_id' => 7, 'type_name' => 'Products',      'count' => $totalProducts],
             ['type_id' => 5, 'type_name' => 'Emails',        'count' => $emailsCount],
             ['type_id' => 6, 'type_name' => 'Counter',       'count' => $counterCount],
         ];
@@ -455,17 +460,22 @@ public function getActivities(Request $request)
                         $daysToDelete = (int) now()->startOfDay()->diffInDays(Carbon::parse($sub->deletion_date)->startOfDay(), false);
                     }
 
+                    $decryptedRemarks = $sub->remarks;
+                    try {
+                        $decryptedRemarks = \App\Services\CryptService::decryptData($sub->remarks);
+                    } catch (\Exception $e) {}
+
                     return [
                         'id' => $sub->id,
                         'product' => $productName,
                         'client' => $clientName,
                         'amount' => $sub->amount,
-                        'renewal_date' => $sub->renewal_date,
-                        'deletion_date' => $sub->deletion_date,
+                        'renewal_date' => $sub->renewal_date ? Carbon::parse($sub->renewal_date)->format('d/m/Y') : null,
+                        'deletion_date' => $sub->deletion_date ? Carbon::parse($sub->deletion_date)->format('d/m/Y') : null,
                         'days_left' => $daysLeft,
                         'days_to_delete' => $daysToDelete,
                         'status' => $sub->status,
-                        'remarks' => $sub->remarks,
+                        'remarks' => $decryptedRemarks,
                         'updated_at' => Carbon::parse($sub->updated_at)->format('j/n/Y, g:i:s a'),
                     ];
                 });

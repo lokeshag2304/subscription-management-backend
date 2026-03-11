@@ -29,8 +29,22 @@ public function list(Request $request)
     $orderBy     = $request->input('orderBy', 'id');
     $search      = strtolower($request->input('search', ''));
     $type        = $request->input('type', 2);
+    $authLoginType = $request->input('auth_login_type');
 
-    $loginType = ($type == 1) ? 3 : 2; 
+    if ($type == 3 && $authLoginType != 1) {
+        return response()->json([
+            'status' => false,
+            'message' => 'Unauthorized access. Only SuperAdmins can view SuperAdmin accounts.'
+        ], 403);
+    }
+
+    if ($type == 1) {
+        $loginType = 3; // Client
+    } elseif ($type == 3) {
+        $loginType = 1; // Superadmin
+    } else {
+        $loginType = 2; // User
+    }
 
     $query = DB::table('superadmins')
         ->select(
@@ -43,6 +57,7 @@ public function list(Request $request)
             'd_password',
             'profile',
             'country',
+            'otp_enabled',
             'created_at'
         )
         ->where('login_type', $loginType);
@@ -106,7 +121,7 @@ public function AddUsermanagement(Request $request)
             'address'  => 'nullable|string|max:500',
             's_id'     => 'required|integer',
             'password' => 'required|string|min:6',
-            'type'     => 'required|in:1,2', // 1=Client, 2=User
+            'type'     => 'required|in:1,2,3', // 1=Client, 2=User, 3=SuperAdmin
             'profile'  => 'nullable|image|mimes:jpg,jpeg,png|max:2048',
         ]);
 
@@ -123,6 +138,14 @@ public function AddUsermanagement(Request $request)
                 'status' => false,
                 'message' => 'domain_ids are required for client'
             ], 422);
+        }
+
+        $authLoginType = $request->input('auth_login_type');
+        if ((int)$request->type === 3 && $authLoginType != 1) {
+            return response()->json([
+                'status' => false,
+                'message' => 'Unauthorized access. Only SuperAdmins can add SuperAdmin accounts.'
+            ], 403);
         }
 
         // 2. Encrypt email & phone
@@ -146,8 +169,13 @@ public function AddUsermanagement(Request $request)
             $profilePath = "admin/usermanagment/{$imageName}";
         }
 
-        // 4. Login type decide
-        $loginType = ((int)$request->type === 1) ? 3 : 2; // 3=Client, 2=User
+        if ((int)$request->type === 1) {
+            $loginType = 3; // Client
+        } elseif ((int)$request->type === 3) {
+            $loginType = 1; // SuperAdmin
+        } else {
+            $loginType = 2; // User
+        }
 
         // 5. Domain JSON only for client
         $domainIdsJson = null;
@@ -166,6 +194,7 @@ public function AddUsermanagement(Request $request)
             'domain_id'  => $domainIdsJson,
             'profile'    => $profilePath,
             'login_type' => $loginType,
+            'otp_enabled'=> $request->input('otp_enabled', 1), // Default to enabled
             'status'     => 1,
             'added_by'   => $request->s_id,
             'created_at' => now()
@@ -210,16 +239,18 @@ public function AddUsermanagement(Request $request)
         }
 
         // 8. Activity log
-        DB::table('activities')->insert([
-            'action'    => CryptService::encryptData("User Added"),
-            's_action'  => CustomCipherService::encryptData("User Added"),
-            'user_id'   => $request->s_id,
-            'message'   => CryptService::encryptData($activityMessage),
-            's_message' => CustomCipherService::encryptData($activityMessage),
-            'details'   => CryptService::encryptData(json_encode($activityDetails)),
-            'created_at'=> now(),
-            'updated_at'=> now(),
-        ]);
+        $userRecord = DB::table('superadmins')->where('id', $userId)->first();
+        \App\Services\ActivityLogger::logActivity(
+            auth()->user() ?? (object)['id' => $request->s_id],
+            'CREATE',
+            $loginType === 3 ? 'Clients' : 'Users',
+            'superadmins',
+            $userId,
+            null,
+            (array)$userRecord,
+            $activityMessage,
+            $request
+        );
 
         return response()->json([
             'status' => true,
@@ -250,7 +281,7 @@ public function updateUsermanagement(Request $request)
             'phone'   => 'required|string|max:20',
             'address' => 'nullable|string|max:500',
             's_id'    => 'required|integer',
-            'type'    => 'required|in:1,2',
+            'type'    => 'required|in:1,2,3',
         ]);
 
         if ($validator->fails()) {
@@ -275,6 +306,14 @@ public function updateUsermanagement(Request $request)
                 'status' => false,
                 'message' => 'domain_ids are required for client'
             ], 422);
+        }
+
+        $authLoginType = $request->input('auth_login_type');
+        if ((int)$request->type === 3 && $authLoginType != 1) {
+            return response()->json([
+                'status' => false,
+                'message' => 'Unauthorized access. Only SuperAdmins can update SuperAdmin accounts.'
+            ], 403);
         }
 
         // ===============================
@@ -335,7 +374,13 @@ public function updateUsermanagement(Request $request)
         $newPhone   = $request->phone;
         $newAddress = $request->address ?? '';
 
-        $loginType = ((int)$request->type === 1) ? 3 : 2;
+        if ((int)$request->type === 1) {
+            $loginType = 3; // Client
+        } elseif ((int)$request->type === 3) {
+            $loginType = 1; // SuperAdmin
+        } else {
+            $loginType = 2; // User
+        }
 
         $newDomainJson = null;
         $newDomains = [];
@@ -391,6 +436,7 @@ public function updateUsermanagement(Request $request)
             'address'    => CryptService::encryptData($newAddress),
             'domain_id'  => $newDomainJson,
             'login_type' => $loginType,
+            'otp_enabled'=> $request->input('otp_enabled', 1),
             'updated_at' => now()
         ];
 
@@ -413,20 +459,19 @@ public function updateUsermanagement(Request $request)
         if (!empty($changes)) {
 
             $finalMessage = implode(' | ', $changes);
-
-            DB::table('activities')->insert([
-                'action'    => CryptService::encryptData("User Updated"),
-                's_action'  => CustomCipherService::encryptData("User Updated"),
-                'user_id'   => $request->s_id,
-                'message'   => CryptService::encryptData($finalMessage),
-                's_message' => CustomCipherService::encryptData($finalMessage),
-                'details'   => CryptService::encryptData(json_encode([
-                    'user_id' => $request->id,
-                    'changes' => $changes
-                ])),
-                'created_at'=> now(),
-                'updated_at'=> now(),
-            ]);
+            
+            $newUserRecord = DB::table('superadmins')->where('id', $request->id)->first();
+            \App\Services\ActivityLogger::logActivity(
+                auth()->user() ?? (object)['id' => $request->s_id],
+                'UPDATE',
+                $loginType === 3 ? 'Clients' : ($loginType === 1 ? 'SuperAdmins' : 'Users'),
+                'superadmins',
+                $request->id,
+                (array)$user,
+                (array)$newUserRecord,
+                $finalMessage,
+                $request
+            );
         }
 
         return response()->json([
@@ -466,6 +511,14 @@ public function getUsermanagementDetails(Request $request)
             ], 404);
         }
 
+        $authLoginType = $request->input('auth_login_type');
+        if ($user->login_type == 1 && $authLoginType != 1) {
+            return response()->json([
+                'status' => false,
+                'message' => 'Unauthorized access. Only SuperAdmins can view SuperAdmin details.'
+            ], 403);
+        }
+
         $safeDecrypt = function($value) {
             if (empty($value)) return $value;
             try {
@@ -485,7 +538,8 @@ public function getUsermanagementDetails(Request $request)
             'address'   => $user->address ? $safeDecrypt($user->address) : '',
             'profile'   => $user->profile,
             'login_type'=> $user->login_type, // 2=user, 3=client
-            'type'      => ($user->login_type == 3 ? 1 : 2), // form ke liye (1=client,2=user)
+            'otp_enabled'=> $user->otp_enabled ?? 1,
+            'type'      => ($user->login_type == 3 ? 1 : ($user->login_type == 1 ? 3 : 2)), // form ke liye (1=client,2=user, 3=superadmin)
         ];
 
         // If client → fetch domains
@@ -582,21 +636,17 @@ public function changeActiveDeactiveMultiple(Request $request)
             $action = "$statusText $typeLabel";
             $message = "$statusText $typeLabel with email: $decryptedEmail";
 
-            DB::table('activities')->insert([
-                'action' => CryptService::encryptData($action),
-                's_action' => CustomCipherService::encryptData($action),
-
-                'user_id' => $request->added_by,
-                'message' => CryptService::encryptData($message),
-                's_message' => CustomCipherService::encryptData($message),
-
-                'details' => CryptService::encryptData(json_encode([
-                    'superadmin_id' => $user->id,
-                    'status' => $request->status,
-                ])),
-                'created_at' => Carbon::now()->setTimezone('Asia/Kolkata'),
-                'updated_at' => Carbon::now()->setTimezone('Asia/Kolkata'),
-            ]);
+            \App\Services\ActivityLogger::logActivity(
+                auth()->user() ?? (object)['id' => $request->added_by],
+                'UPDATE',
+                $loginType == 2 ? 'Users' : ($loginType == 3 ? 'Clients' : 'Users'),
+                'superadmins',
+                $user->id,
+                ['status' => $user->status], // old status
+                ['status' => $request->status], // new status
+                $message,
+                $request
+            );
         }
 
         return response()->json([
@@ -637,6 +687,16 @@ public function deleteUsers(Request $request)
         ], 404);
     }
 
+    $authLoginType = $request->input('auth_login_type');
+    foreach ($superadmins as $admin) {
+        if ($admin->login_type == 1 && $authLoginType != 1) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Unauthorized access. Only SuperAdmins can delete SuperAdmin accounts.'
+            ], 403);
+        }
+    }
+
  
     $superadminNames = [];
 
@@ -655,22 +715,19 @@ public function deleteUsers(Request $request)
         ->whereIn('id', $superadminIds)
         ->delete();
 
-  
     $activityMessage = "Users deleted: " . $namesString;
 
-    DB::table('activities')->insert([
-        'action'     => CryptService::encryptData("Users Deleted"),
-        's_action'   => CustomCipherService::encryptData("Users Deleted"),
-        'user_id'    => $deletedBy,
-        'message'    => CryptService::encryptData($activityMessage),
-        's_message'  => CustomCipherService::encryptData($activityMessage),
-        'details'    => CryptService::encryptData(json_encode([
-            'superadmin_ids' => $superadminIds,
-            'names'          => $superadminNames,
-        ])),
-        'created_at' => now(),
-        'updated_at' => now(),
-    ]);
+    \App\Services\ActivityLogger::logActivity(
+        auth()->user() ?? (object)['id' => $deletedBy],
+        'DELETE',
+        'Clients/Users',
+        'superadmins',
+        null,
+        ['deleted_ids' => $superadminIds, 'names' => $superadminNames],
+        null,
+        $activityMessage,
+        $request
+    );
 
     return response()->json([
         'success' => true,

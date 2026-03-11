@@ -45,13 +45,31 @@ class CounterController extends Controller
         }
     }
 
-    private function logActivity($action, $record)
+    private function getDerivedCount($clientId, $productId, $vendorId)
+    {
+        return \App\Services\CounterSyncService::calculate($clientId, $productId, $vendorId);
+    }
+
+    private function logActivity($action, $record, $oldData = null, $newData = null)
     {
         try {
+            $user = auth()->user() ?: (object)['id' => request()->input('auth_user_id') ?: 1, 'name' => 'Admin', 'role' => 'Superadmin'];
             $label = ucfirst($action);
             $clientName = $record->client_name ?? ($record->client->name ?? 'N/A');
-            $details = "Client: {$clientName} | Renewal: " . ($record->renewal_date ?? '-');
-            ActivityLogger::log(null, "Counter {$label}", $details, 'Counter');
+            $prodName = $record->product_name ?? ($record->product->name ?? 'N/A');
+            $details = "Row: {$record->id} | Client: {$clientName} | Product: {$prodName}";
+            
+            ActivityLogger::logActivity(
+                $user, 
+                strtoupper($action), 
+                'Counter', 
+                'counters', 
+                $record->id, 
+                $oldData, 
+                $newData, 
+                "Counter {$label}: {$details}",
+                request()
+            );
         } catch (\Exception $e) {}
     }
 
@@ -187,12 +205,7 @@ class CounterController extends Controller
                ]);
             }
 
-            // Calculate auto fields before create
-            $today = now()->startOfDay();
-            $days_left = $request->renewal_date ? $today->diffInDays($request->renewal_date, false) : null;
-            $days_to_delete = $request->deletion_date ? $today->diffInDays($request->deletion_date, false) : null;
-
-            $amount = $request->amount ?? $request->counter_count ?? 0;
+            $amount = $this->getDerivedCount($request->client_id, $request->product_id, $request->vendor_id);
 
             // STEP 5 — STANDARD CREATE LOGIC
             $model = Counter::create([
@@ -202,8 +215,8 @@ class CounterController extends Controller
                'amount'        => $amount,
                'renewal_date'  => $request->renewal_date,
                'deletion_date' => $request->deletion_date,
-               'days_left'     => $days_left,
-               'days_to_delete'=> $days_to_delete,
+               'days_left'     => $request->renewal_date ? $today->diffInDays($request->renewal_date, false) : null,
+               'days_to_delete'=> $request->deletion_date ? $today->diffInDays($request->deletion_date, false) : null,
                'status'        => $request->status ?? 1,
                'remarks'       => \App\Services\CryptService::encryptData($request->remarks)
             ]);
@@ -269,9 +282,12 @@ class CounterController extends Controller
             $data['renewal_date'] = $data['valid_till'];
         }
 
-        if (isset($data['counter_count']) && !isset($data['amount'])) {
-            $data['amount'] = $data['counter_count'];
-        }
+        // ALWAYS override amount with derived count from database
+        $data['amount'] = $this->getDerivedCount(
+            $data['client_id'] ?? $record->client_id,
+            $data['product_id'] ?? $record->product_id,
+            $data['vendor_id'] ?? $record->vendor_id
+        );
 
         if (isset($data['renewal_date'])) $data['renewal_date'] = $this->formatDate($data['renewal_date']);
         if (isset($data['deletion_date'])) $data['deletion_date'] = $this->formatDate($data['deletion_date']);
@@ -284,8 +300,17 @@ class CounterController extends Controller
             $data['remarks'] = \App\Services\CryptService::encryptData($data['remarks']);
         }
 
+        // Capture old state for logging
+        $oldData = $record->toArray();
+        if ($record->client)   $oldData['client']  = $record->client_name;
+        if ($record->product)  $oldData['product'] = $record->product_name;
+        if ($record->vendor)   $oldData['vendor']  = $record->vendor_name;
+
+        // Perform Update
         $record->update($data);
         $record->refresh()->load(['product', 'client', 'vendor'])->loadCount('remarkHistories');
+        
+        // Decrypt names for logging/response
         $record->client_name  = $record->client->name  ?? null;
         try { $record->client_name = \App\Services\CryptService::decryptData($record->client_name) ?? $record->client_name; } catch (\Exception $e) {}
         
@@ -294,14 +319,18 @@ class CounterController extends Controller
         
         $record->vendor_name  = $record->vendor->name  ?? null;
         try { $record->vendor_name = \App\Services\CryptService::decryptData($record->vendor_name) ?? $record->vendor_name; } catch (\Exception $e) {}
+        
         $record->remarks      = \App\Services\CryptService::decryptData($record->remarks) ?? $record->remarks;
         $record->expiry_date  = $record->renewal_date;
         $record->has_remark_history = $record->remark_histories_count > 0;
+
+        // Prepare response data
         $resp = $record->toArray();
         $resp['client_name']  = $record->client_name;
         $resp['product_name'] = $record->product_name;
         $resp['vendor_name']  = $record->vendor_name;
         $resp['counter_count'] = $record->amount;
+        $resp['amount']       = $record->amount; // Ensure consistency
         $resp['valid_till']    = $record->renewal_date;
         $resp['remarks']      = $record->remarks;
         $resp['expiry_date']  = $record->expiry_date;
@@ -309,9 +338,10 @@ class CounterController extends Controller
         $resp['last_updated'] = DateFormatterService::format($record->updated_at);
         $resp['updated_at_formatted'] = DateFormatterService::format($record->updated_at);
         $resp['created_at_formatted'] = DateFormatterService::format($record->created_at);
-        // updated_at / created_at kept as raw ISO from toArray() — do NOT overwrite
-        
-        $this->logActivity('updated', $record);
+
+        // Advanced Logging
+        $newData = $resp;
+        $this->logActivity('UPDATE', $record, $oldData, $newData);
 
         return response()->json([
             'success' => true,
@@ -409,46 +439,7 @@ class CounterController extends Controller
             'vendor_id' => 'required',
         ]);
 
-        // Fetch requested entities and decrypt their names to find siblings
-        $clientReq = \App\Models\Superadmin::find($validated['client_id']);
-        $productReq = \App\Models\Product::find($validated['product_id']);
-        $vendorReq = \App\Models\Vendor::find($validated['vendor_id']);
-        
-        $cNameDecrypted = null;
-        $pNameDecrypted = null;
-        $vNameDecrypted = null;
-
-        if ($clientReq) {
-            try { $cNameDecrypted = \App\Services\CryptService::decryptData($clientReq->name) ?? $clientReq->name; } catch (\Exception $e) {}
-        }
-        if ($productReq) {
-            try { $pNameDecrypted = \App\Services\CryptService::decryptData($productReq->name) ?? $productReq->name; } catch (\Exception $e) {}
-        }
-        if ($vendorReq) {
-            try { $vNameDecrypted = \App\Services\CryptService::decryptData($vendorReq->name) ?? $vendorReq->name; } catch (\Exception $e) {}
-        }
-
-        // Helper to find all IDs matching a decrypted name exactly (case insensitive)
-        $findMatchingIds = function ($modelClass, $decryptedName, $defaultId) {
-            if (!$decryptedName) return [$defaultId];
-            return $modelClass::all()->filter(function ($item) use ($decryptedName) {
-                try {
-                    $dec = \App\Services\CryptService::decryptData($item->name) ?? $item->name;
-                    return strtolower(trim($dec)) === strtolower(trim($decryptedName));
-                } catch (\Exception $e) {
-                    return strtolower(trim($item->name)) === strtolower(trim($decryptedName));
-                }
-            })->pluck('id')->toArray();
-        };
-
-        $matchingClients = $findMatchingIds(\App\Models\Superadmin::class, $cNameDecrypted, $validated['client_id']);
-        $matchingProducts = $findMatchingIds(\App\Models\Product::class, $pNameDecrypted, $validated['product_id']);
-        $matchingVendors = $findMatchingIds(\App\Models\Vendor::class, $vNameDecrypted, $validated['vendor_id']);
-
-        $count = \App\Models\Subscription::whereIn('client_id', $matchingClients)
-                    ->whereIn('product_id', $matchingProducts)
-                    ->whereIn('vendor_id', $matchingVendors)
-                    ->count();
+        $count = \App\Services\CounterSyncService::calculate($validated['client_id'], $validated['product_id'], $validated['vendor_id']);
 
         return response()->json([
             'success' => true,
