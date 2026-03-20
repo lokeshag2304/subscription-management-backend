@@ -13,6 +13,7 @@ use Illuminate\Support\Facades\Validator;
 use App\Services\CryptService;
 use App\Services\DateFormatterService;
 use App\Services\CustomCipherService;
+use Illuminate\Support\Facades\Log;
 
 class ProductsController extends Controller
 {
@@ -20,8 +21,9 @@ class ProductsController extends Controller
    public function storeProducts(Request $request)
 {
     $data = json_decode($request->getContent(), true);
+    Log::info('Product store request', ['url' => $request->fullUrl(), 'payload' => $data]);
 
-    $domainName = $data['name'] ?? null;
+    $domainName = isset($data['name']) ? trim($data['name']) : null;
     $s_id       = $data['s_id'] ?? null;
 
     if (!$domainName || !$s_id) {
@@ -77,9 +79,10 @@ class ProductsController extends Controller
 public function updateProducts(Request $request)
 {
     $data = json_decode($request->getContent(), true);
+    Log::info('Product update request', ['url' => $request->fullUrl(), 'payload' => $data]);
 
     $domainId   = $data['id'] ?? null;
-    $newName    = $data['name'] ?? null;
+    $newName    = isset($data['name']) ? trim($data['name']) : null;
     $s_id       = $data['s_id'] ?? null;
 
     if (!$domainId || !$newName || !$s_id) {
@@ -95,7 +98,7 @@ public function updateProducts(Request $request)
     if (!$domain) {
         return response()->json([
             'success' => false,
-            'message' => 'Domain not found',
+            'message' => 'Product not found',
         ], 404);
     }
 

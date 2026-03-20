@@ -3,14 +3,18 @@
 namespace App\Http\Controllers;
 
 use App\Models\Hosting;
-use App\Models\Activity;
-use App\Models\ImportExportHistory;
+use App\Models\Product;
+use App\Models\Superadmin;
+use App\Models\Vendor;
+use App\Models\Domain;
 use Illuminate\Http\Request;
-use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Carbon;
 use App\Services\ActivityLogger;
 use App\Services\ClientScopeService;
+use App\Services\CryptService;
 use App\Services\DateFormatterService;
+use App\Services\GracePeriodService;
 
 class HostingController extends Controller
 {
@@ -45,14 +49,15 @@ class HostingController extends Controller
         }
     }
 
-    private function logActivity($action, $record)
+    private function logActivity($action, $record, $oldData = null, $newData = null)
     {
         try {
             $label = ucfirst($action);
-            $domainName = $record->domain_name ?? $record->id;
-            $clientName = $record->client_name ?? ($record->client->name ?? 'N/A');
-            $details = "Domain: {$domainName} | Client: {$clientName} | Renewal: " . ($record->renewal_date ?? '-');
-            ActivityLogger::log(null, "Hosting {$label}", $details, 'Hosting');
+            $actionType = $action === 'created' ? 'CREATE' : ($action === 'deleted' ? 'DELETE' : 'UPDATE');
+            if ($actionType === 'CREATE' && !$newData && $record) $newData = $record->toArray();
+            if ($actionType === 'DELETE' && !$oldData && $record) $oldData = $record->toArray();
+
+            ActivityLogger::logActivity(auth()->user(), $actionType, 'Hosting', 'hostings', $record->id, $oldData, $newData, "Hosting {$label}", request());
         } catch (\Exception $e) {}
     }
 
@@ -65,7 +70,8 @@ class HostingController extends Controller
         $query = Hosting::select([
             'id', 'product_id', 'client_id', 'vendor_id', 'domain_id',
             'amount', 'renewal_date', 'deletion_date', 'status', 
-            'remarks', 'created_at', 'updated_at', 'bill_type', 'start_date'
+            'remarks', 'created_at', 'updated_at', 'bill_type', 'start_date',
+            'grace_period', 'due_date'
         ])
         ->with([
             'product:id,name', 
@@ -121,6 +127,7 @@ class HostingController extends Controller
 
                 $item->vendor_name = $item->vendor->name ?? null;
                 try { $item->vendor_name = \App\Services\CryptService::decryptData($item->vendor_name) ?? $item->vendor_name; } catch (\Exception $e) {}
+                try { $item->remarks = \App\Services\CryptService::decryptData($item->remarks); } catch (\Exception $e) {}
                 $item->has_remark_history = $item->remark_histories_count > 0;
 
                 $item->last_updated = DateFormatterService::format($item->updated_at);
@@ -128,10 +135,9 @@ class HostingController extends Controller
                 $item->created_at_formatted = DateFormatterService::format($item->created_at ?? $item->updated_at);
                 // Do NOT overwrite updated_at/created_at — keep raw ISO for Eloquent casting
                 
-                try {
-                    $dec = \App\Services\CryptService::decryptData($item->remarks);
-                    $item->remarks = \App\Services\CryptService::decryptData($dec);
-                } catch (\Exception $e) {}
+                
+                $item->grace_period = $item->grace_period ?? 0;
+                $item->due_date = $item->due_date;
                 
                 return $item;
             });
@@ -195,9 +201,13 @@ class HostingController extends Controller
                'deletion_date' => $request->deletion_date,
                'days_left'     => $days_left,
                'days_to_delete'=> $days_to_delete,
-                'status'        => $request->status ?? 1,
-                'remarks'       => $request->remarks ? \App\Services\CryptService::encryptData($request->remarks) : null
+               'grace_period'  => $request->grace_period ?? 0,
+               'status'        => $request->status ?? 1,
+               'remarks'       => $request->remarks ? \App\Services\CryptService::encryptData($request->remarks) : null
             ]);
+
+            \App\Services\GracePeriodService::syncModel($model);
+            $model->save();
 
             try { $model->remarks = \App\Services\CryptService::decryptData($model->remarks) ?? $model->remarks; } catch (\Exception $e) {}
 
@@ -266,13 +276,18 @@ class HostingController extends Controller
 
         $this->calculateFields($data);
 
+        // Track Remark History
+        \App\Services\RemarkHistoryService::logUpdate('Hosting', $record, $data);
+
         if (isset($data['remarks'])) {
-            // Track Remark History
-            \App\Services\RemarkHistoryService::trackChange('Hosting', $record->id, $record->remarks, $data['remarks']);
             $data['remarks'] = \App\Services\CryptService::encryptData($data['remarks']);
         }
 
+        $oldData = clone $record;
         $record->update($data);
+
+        \App\Services\GracePeriodService::syncModel($record);
+        $record->save();
         $record->refresh()->load(['product', 'client', 'vendor', 'domainInfo'])->loadCount('remarkHistories');
         $record->client_name  = $record->client->name  ?? null;
         try { $record->client_name = \App\Services\CryptService::decryptData($record->client_name) ?? $record->client_name; } catch (\Exception $e) {}
@@ -285,8 +300,7 @@ class HostingController extends Controller
         
         $record->domain_name  = $record->domainInfo->name ?? null;
         try { $record->domain_name = \App\Services\CryptService::decryptData($record->domain_name) ?? $record->domain_name; } catch (\Exception $e) {}
-
-        $record->remarks      = \App\Services\CryptService::decryptData($record->remarks) ?? $record->remarks;
+        $record->remarks      = \App\Services\CryptService::decryptData($record->remarks);
         $record->expiry_date  = $record->renewal_date;
         $record->has_remark_history = $record->remark_histories_count > 0;
         $resp = $record->toArray();
@@ -302,7 +316,7 @@ class HostingController extends Controller
         $resp['created_at_formatted'] = DateFormatterService::format($record->created_at);
         // updated_at / created_at kept as raw ISO from toArray() — do NOT overwrite
         
-        $this->logActivity('updated', $record);
+        $this->logActivity('updated', $record, $oldData->toArray(), $record->toArray());
 
         return response()->json([
             'success' => true,

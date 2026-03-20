@@ -10,7 +10,7 @@ use App\Models\Vendor;
 
 class Domain extends Model
 {
-    use HasFactory;
+    use HasFactory, \App\Traits\GracePeriodTrait;
     
     protected $table = 'domains';
 
@@ -25,6 +25,8 @@ class Domain extends Model
         'days_left',
         'days_to_delete',
         'domain_protected',
+        'grace_period',
+        'due_date',
         'status',
         'remarks',
     ];

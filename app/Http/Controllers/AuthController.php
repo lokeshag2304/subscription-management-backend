@@ -123,20 +123,13 @@ public function login(Request $request)
     $inputEmail = $data['email'];
     $inputPassword = $data['password'];
 
-    $superadmins = DB::table('superadmins')
+    // Optimized: Search directly by encrypted email instead of looping through all users
+    $encryptedEmail = CryptService::encryptData($inputEmail);
+    $matchedAdmin = DB::table('superadmins')
         ->select('id', 'email', 'password', 'login_type', 'name', 'profile', 'status', 'subadmin_id', 'otp_enabled')
-        ->get();
+        ->where('email', $encryptedEmail)
+        ->first();
 
-    $matchedAdmin = null;
-
-    foreach ($superadmins as $admin) {
-        $decryptedEmail = CryptService::decryptData($admin->email);
-
-        if ($decryptedEmail === $inputEmail) {
-            $matchedAdmin = $admin;
-            break;
-        }
-    }
 
     if (!$matchedAdmin) {
         return response()->json(['message' => 'Invalid credentials']);

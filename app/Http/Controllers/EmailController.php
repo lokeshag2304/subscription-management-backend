@@ -3,14 +3,18 @@
 namespace App\Http\Controllers;
 
 use App\Models\Email;
-use App\Models\Activity;
-use App\Models\ImportExportHistory;
+use App\Models\Product;
+use App\Models\Superadmin;
+use App\Models\Vendor;
+use App\Models\Domain;
 use Illuminate\Http\Request;
-use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Carbon;
 use App\Services\ActivityLogger;
 use App\Services\ClientScopeService;
+use App\Services\CryptService;
 use App\Services\DateFormatterService;
+use App\Services\GracePeriodService;
 
 class EmailController extends Controller
 {
@@ -45,13 +49,15 @@ class EmailController extends Controller
         }
     }
 
-    private function logActivity($action, $record)
+    private function logActivity($action, $record, $oldData = null, $newData = null)
     {
         try {
             $label = ucfirst($action);
-            $clientName = $record->client_name ?? ($record->client->name ?? 'N/A');
-            $details = "Client: {$clientName} | Renewal: " . ($record->renewal_date ?? '-');
-            ActivityLogger::log(null, "Email {$label}", $details, 'Email');
+            $actionType = $action === 'created' ? 'CREATE' : ($action === 'deleted' ? 'DELETE' : 'UPDATE');
+            if ($actionType === 'CREATE' && !$newData && $record) $newData = $record->toArray();
+            if ($actionType === 'DELETE' && !$oldData && $record) $oldData = $record->toArray();
+
+            ActivityLogger::logActivity(auth()->user(), $actionType, 'Email', 'emails', $record->id, $oldData, $newData, "Email {$label}", request());
         } catch (\Exception $e) {}
     }
 
@@ -65,7 +71,8 @@ class EmailController extends Controller
             'id', 'product_id', 'client_id', 'vendor_id', 'domain_id',
             'quantity', 'bill_type', 'start_date',
             'amount', 'renewal_date', 'deletion_date', 'status', 
-            'remarks', 'created_at', 'updated_at'
+            'remarks', 'created_at', 'updated_at',
+            'grace_period', 'due_date'
         ])
         ->with([
             'product:id,name', 
@@ -126,8 +133,7 @@ class EmailController extends Controller
 
                 $item->has_remark_history = $item->remark_histories_count > 0;
                 try {
-                    $dec = \App\Services\CryptService::decryptData($item->remarks);
-                    $item->remarks = \App\Services\CryptService::decryptData($dec);
+                    $item->remarks = \App\Services\CryptService::decryptData($item->remarks);
                 } catch (\Exception $e) {}
 
                 $data = $item->toArray();
@@ -139,6 +145,8 @@ class EmailController extends Controller
                 $data['domain_name'] = $item->domain_name;
                 $data['has_remark_history'] = $item->has_remark_history;
                 $data['remarks'] = $item->remarks;
+                $data['grace_period'] = $item->grace_period ?? 0;
+                $data['due_date'] = $item->due_date;
 
                 $data['last_updated'] = DateFormatterService::format($item->updated_at);
                 $data['updated_at_formatted'] = DateFormatterService::format($item->updated_at);
@@ -208,9 +216,13 @@ class EmailController extends Controller
                'deletion_date' => $request->deletion_date,
                'days_left'     => $days_left,
                'days_to_delete'=> $days_to_delete,
+               'grace_period'  => $request->grace_period ?? 0,
                 'status'        => $request->status ?? 1,
                 'remarks'       => $request->remarks ? \App\Services\CryptService::encryptData($request->remarks) : null
             ]);
+
+            \App\Services\GracePeriodService::syncModel($model);
+            $model->save();
 
             try { $model->remarks = \App\Services\CryptService::decryptData($model->remarks) ?? $model->remarks; } catch (\Exception $e) {}
 
@@ -279,13 +291,18 @@ class EmailController extends Controller
 
         $this->calculateFields($data);
 
-        if (isset($data['remarks'])) {
-            // Track Remark History
-            \App\Services\RemarkHistoryService::trackChange('Emails', $record->id, $record->remarks, $data['remarks']);
-            $data['remarks'] = \App\Services\CryptService::encryptData($data['remarks']);
-        }
+            // Log changes before update
+            \App\Services\RemarkHistoryService::logUpdate('Email', $record, $data);
 
+            if (isset($data['remarks'])) {
+                $data['remarks'] = \App\Services\CryptService::encryptData($data['remarks']);
+            }
+
+        $oldData = clone $record;
         $record->update($data);
+        
+        \App\Services\GracePeriodService::syncModel($record);
+        $record->save();
         $record->refresh()->load(['product', 'client', 'vendor', 'domainInfo'])->loadCount('remarkHistories');
         $record->client_name  = $record->client->name  ?? null;
         try { $record->client_name = \App\Services\CryptService::decryptData($record->client_name) ?? $record->client_name; } catch (\Exception $e) {}
@@ -314,7 +331,7 @@ class EmailController extends Controller
         $resp['created_at_formatted'] = DateFormatterService::format($record->created_at);
         // updated_at / created_at kept as raw ISO from toArray() — do NOT overwrite
         
-        $this->logActivity('updated', $record);
+        $this->logActivity('updated', $record, $oldData->toArray(), $record->toArray());
 
         return response()->json([
             'success' => true,

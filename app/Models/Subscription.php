@@ -11,17 +11,20 @@ use App\Models\RemarkHistory;
 
 class Subscription extends Model
 {
-    use HasFactory;
+    use HasFactory, \App\Traits\GracePeriodTrait;
 
     protected $fillable = [
         'product_id',
         'client_id',
         'vendor_id',
         'amount',
+        'currency',
         'renewal_date',
         'deletion_date',
         'days_left',
         'days_to_delete',
+        'grace_period',
+        'due_date',
         'status',
         'remarks',
     ];

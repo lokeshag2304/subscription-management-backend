@@ -209,10 +209,23 @@ class ActivityLogger
 
             // Set specific description for UPDATES
             if (strtoupper($actionType) === 'UPDATE' && collect($changes)->count() > 0) {
+                $detailStr = [];
+                foreach ($changes as $c) {
+                    $cOld = $c['old'] ?? 'N/A';
+                    $cNew = $c['new'] ?? 'N/A';
+                    $detailStr[] = "{$c['field']} changed from {$cOld} to {$cNew}";
+                }
+                
+                $newDescription = "";
                 if (count($changes) === 1) {
-                    $description = $changes[0]['field'] . ' updated';
+                    $newDescription = "{$changes[0]['field']} changed from " . ($changes[0]['old'] ?? 'N/A') . " to " . ($changes[0]['new'] ?? 'N/A');
                 } else {
-                    $description = implode(', ', array_column($changes, 'field')) . ' updated';
+                    $newDescription = "{$module} updated: " . implode(', ', $detailStr);
+                }
+
+                // Only overwrite if current description is generic, empty, or just "Module Updated"
+                if (!$description || preg_match('/(updated|created|deleted)$/i', trim($description)) || strlen($description) < 5) {
+                    $description = $newDescription;
                 }
             }
 
@@ -279,7 +292,24 @@ class ActivityLogger
             }
         }
 
+        if (!empty($data['domain_id']) && !isset($data['domain'])) {
+            $d = DB::table('domains')->where('id', $data['domain_id'])->first();
+            if ($d) {
+                $dName = $d->domain_name ?? $d->name ?? 'Unknown Domain';
+                if ($dName && is_string($dName) && strlen($dName) > 16 && preg_match('/^[A-Za-z0-9+\/=]{16,}$/', $dName) && !preg_match('/[\s\-\_\.\,\:\@\/]/', $dName)) {
+                    try { $dec = CryptService::decryptData($dName); if ($dec && $dec !== $dName) $dName = $dec; } catch (\Exception $e) {}
+                }
+                $data['domain'] = $dName;
+            }
+        }
+
         foreach ($data as $key => $val) {
+            // Format dates for display
+            if (in_array($key, ['renewal_date', 'deletion_date', 'start_date']) && !empty($val)) {
+                try {
+                    $val = \Carbon\Carbon::parse($val)->format('d-m-Y');
+                } catch (\Exception $e) {}
+            }
             // IGNORE technical / irrelevant fields from being logged
             if (in_array($key, [
                 'updated_at', 'created_at', 'password', 'token', 'metadata', 

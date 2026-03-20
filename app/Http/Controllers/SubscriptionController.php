@@ -3,12 +3,19 @@
 namespace App\Http\Controllers;
 
 use App\Models\Subscription;
-use Maatwebsite\Excel\Facades\Excel;
-use App\Imports\SubscriptionImport;
+use App\Models\Product;
+use App\Models\Vendor;
+use App\Models\Superadmin;
 use App\Services\ActivityLogger;
 use App\Services\ClientScopeService;
+use App\Services\CryptService;
 use App\Services\DateFormatterService;
+use App\Services\GracePeriodService;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Schema;
+use Illuminate\Support\Carbon;
+use Maatwebsite\Excel\Facades\Excel;
+use App\Imports\SubscriptionImport;
 
 class SubscriptionController extends Controller
 {
@@ -18,11 +25,23 @@ class SubscriptionController extends Controller
         $offset = $request->query('offset', 0);
         $search = $request->query('search', '');
 
-        $query = Subscription::select([
-            'id', 'product_id', 'client_id', 'vendor_id', 
-            'amount', 'renewal_date', 'deletion_date', 'status', 
+        // Detect if the currency column exists (safe for pre-migration environments)
+        static $hasCurrencyCache = null;
+        if ($hasCurrencyCache === null) {
+            $hasCurrencyCache = Schema::hasColumn('subscriptions', 'currency');
+        }
+
+        $selectFields = [
+            'id', 'product_id', 'client_id', 'vendor_id',
+            'amount', 'renewal_date', 'deletion_date', 'days_to_delete',
+            'grace_period', 'due_date', 'status',
             'remarks', 'created_at', 'updated_at'
-        ])
+        ];
+        if ($hasCurrencyCache) {
+            array_splice($selectFields, 4, 0, ['currency']);
+        }
+
+        $query = Subscription::select($selectFields)
         ->with([
             'product:id,name', 
             'client:id,name', 
@@ -36,9 +55,9 @@ class SubscriptionController extends Controller
         if (!empty($search)) {
             $searchLow = strtolower($search);
             
-            $pIds = \App\Models\Product::pluck('name', 'id')
+            $pIds = Product::pluck('name', 'id')
                 ->filter(function($name) use ($searchLow) {
-                    $dec = \App\Services\CryptService::decryptData($name);
+                    $dec = CryptService::decryptData($name);
                     return str_contains(strtolower($dec ?? $name), $searchLow);
                 })->keys();
 
@@ -67,7 +86,19 @@ class SubscriptionController extends Controller
         $subscriptions = $query->get();
 
         $subscriptions = $subscriptions->map(function ($sub) {
+            // Calculate days without hitting DB if possible
             $today = now()->startOfDay();
+
+            // Apply Grace Period logic in memory
+            // We AVOID saving in the index loop to prevent performance timeouts
+            $renewalDate = $sub->renewal_date;
+            $res = \App\Services\GracePeriodService::calculate($renewalDate, $sub->grace_period ?? 0);
+            
+            // Only update model in memory
+            $sub->due_date = $res['due_date'];
+            if ($res['should_be_inactive']) {
+                $sub->status = 0;
+            }
 
             $daysLeft = $sub->renewal_date
                 ? $today->diffInDays(\Illuminate\Support\Carbon::parse($sub->renewal_date)->startOfDay(), false)
@@ -96,12 +127,15 @@ class SubscriptionController extends Controller
                 'client_id' => $sub->client_id,
                 'vendor_id' => $sub->vendor_id,
                 'amount' => (float) $sub->amount,
+                'currency' => $sub->currency ?? 'INR',
                 'renewal_date' => $sub->renewal_date,
                 'deletion_date' => $sub->deletion_date,
                 'days_left' => $daysLeft,
                 'days_to_delete' => $daysToDelete,
+                'grace_period' => $sub->grace_period ?? 0,
+                'due_date' => $sub->due_date,
                 'status' => $sub->status,
-                'remarks' => \App\Services\CryptService::decryptData(\App\Services\CryptService::decryptData($sub->remarks)),
+                'remarks' => CryptService::decryptData($sub->remarks),
                 'has_remark_history' => $sub->remark_histories_count > 0,
                 'last_updated' => DateFormatterService::format($sub->updated_at),
                 'updated_at_formatted' => DateFormatterService::format($sub->updated_at),
@@ -151,24 +185,34 @@ class SubscriptionController extends Controller
                 // Compute days_left and days_to_delete server-side
                 $today = now()->startOfDay();
                 $computedDaysLeft = $request->renewal_date
-                    ? $today->diffInDays(\Carbon\Carbon::parse($request->renewal_date)->startOfDay(), false)
+                    ? $today->diffInDays(Carbon::parse($request->renewal_date)->startOfDay(), false)
                     : null;
                 $computedDaysToDelete = $request->deletion_date
-                    ? $today->diffInDays(\Carbon\Carbon::parse($request->deletion_date)->startOfDay(), false)
+                    ? $today->diffInDays(Carbon::parse($request->deletion_date)->startOfDay(), false)
                     : null;
+
+                $hasCurrency = Schema::hasColumn('subscriptions', 'currency');
+                $hasGracePeriod = Schema::hasColumn('subscriptions', 'grace_period');
 
                 $subscription = Subscription::create([
                     'product_id' => $request->product_id,
                     'client_id' => $request->client_id,
                     'vendor_id' => $request->vendor_id,
                     'amount' => $request->amount,
+                    ...($hasCurrency ? ['currency' => $request->input('currency', 'INR')] : []),
                     'renewal_date' => $request->renewal_date,
                     'deletion_date' => $request->deletion_date,
                     'days_left' => $computedDaysLeft,
                     'days_to_delete' => $computedDaysToDelete,
+                    'grace_period' => $hasGracePeriod ? ($request->grace_period ?? 0) : 0,
                     'status' => $request->status ?? 1,
                     'remarks' => \App\Services\CryptService::encryptData($request->remarks)
                 ]);
+
+                if ($hasGracePeriod) {
+                    \App\Services\GracePeriodService::syncModel($subscription);
+                    $subscription->save();
+                }
 
                 $pName = optional($subscription->product)->name;
                 $cName = optional($subscription->client)->name;
@@ -189,6 +233,7 @@ class SubscriptionController extends Controller
                 // Ensure computed values are in the response (toArray() should have them but be explicit)
                 $data['days_left']     = $computedDaysLeft;
                 $data['days_to_delete'] = $computedDaysToDelete;
+                $data['currency']      = $subscription->currency ?? 'INR';
                 ActivityLogger::logActivity(
                     auth()->user() ?? (object)['id' => $request->input('s_id') ?? null],
                     'CREATE',
@@ -245,9 +290,10 @@ class SubscriptionController extends Controller
                  try { $data['deletion_date'] = \Illuminate\Support\Carbon::parse($data['deletion_date'])->format('Y-m-d'); } catch (\Exception $e) {}
             }
 
+            // Log changes before update
+            \App\Services\RemarkHistoryService::logUpdate('Subscription', $record, $data);
+
             if (isset($data['remarks'])) {
-                // Track before encrypting
-                \App\Services\RemarkHistoryService::trackChange('Subscription', $record->id, $record->remarks, $data['remarks']);
                 $data['remarks'] = \App\Services\CryptService::encryptData($data['remarks']);
             }
 
@@ -262,8 +308,20 @@ class SubscriptionController extends Controller
                 ? $today->diffInDays(\Illuminate\Support\Carbon::parse($deletionDate)->startOfDay(), false)
                 : null;
 
+            // Guard: remove currency from payload if the column doesn't exist yet (pre-migration safety)
+            $hasCurrency = \Illuminate\Support\Facades\Schema::hasColumn('subscriptions', 'currency');
+            if (!$hasCurrency) {
+                unset($data['currency']);
+            }
+
             $oldData = $record->toArray();
             $record->update($data);
+
+            if (\Illuminate\Support\Facades\Schema::hasColumn('subscriptions', 'grace_period')) {
+                \App\Services\GracePeriodService::syncModel($record);
+                $record->save();
+            }
+            
             $record->refresh()->load(['product', 'client', 'vendor'])->loadCount('remarkHistories');
             
             $pName = optional($record->product)->name;
@@ -274,7 +332,7 @@ class SubscriptionController extends Controller
             try { $vName = \App\Services\CryptService::decryptData($vName) ?? $vName; } catch (\Exception $e) {}
 
             $resp = $record->toArray();
-            $resp['remarks'] = \App\Services\CryptService::decryptData($record->remarks) ?? $record->remarks;
+            $resp['remarks'] = \App\Services\CryptService::decryptData($record->remarks);
             $resp['product_name'] = $pName;
             $resp['client_name']  = $cName;
             $resp['vendor_name']  = $vName;
@@ -293,6 +351,54 @@ class SubscriptionController extends Controller
                 ? $today->diffInDays(\Illuminate\Support\Carbon::parse($record->deletion_date)->startOfDay(), false)
                 : null;
 
+            // ── Build activity log description with field-level change details ──
+            $changedLines = [];
+
+            // CURRENCY — read from request directly (not $data, which may have been unset pre-migration)
+            $newCurrency = $request->input('currency');
+            $oldCurrency = $oldData['currency'] ?? 'INR';
+            if ($newCurrency !== null && $hasCurrency && (string)$oldCurrency !== (string)$newCurrency) {
+                $changedLines[] = "Currency: {$oldCurrency} → {$newCurrency}";
+            }
+
+            // AMOUNT
+            if (isset($data['amount']) && (float)($oldData['amount'] ?? 0) !== (float)$data['amount']) {
+                $changedLines[] = "Amount: " . ($oldData['amount'] ?? '0') . " → " . $data['amount'];
+            }
+
+            // RENEWAL DATE
+            if (!empty($data['renewal_date']) && ($oldData['renewal_date'] ?? '') !== $data['renewal_date']) {
+                $changedLines[] = "Renewal Date: " . ($oldData['renewal_date'] ?? 'N/A') . " → " . $data['renewal_date'];
+            }
+
+            // VENDOR
+            if (!empty($data['vendor_id']) && (string)($oldData['vendor_id'] ?? '') !== (string)$data['vendor_id']) {
+                $vOld = optional(\App\Models\Vendor::find($oldData['vendor_id']))->name;
+                $vNew = optional(\App\Models\Vendor::find($data['vendor_id']))->name;
+                try { $vOld = \App\Services\CryptService::decryptData($vOld) ?? $vOld; } catch (\Exception $e) {}
+                try { $vNew = \App\Services\CryptService::decryptData($vNew) ?? $vNew; } catch (\Exception $e) {}
+                $changedLines[] = "Vendor: " . ($vOld ?? $oldData['vendor_id']) . " → " . ($vNew ?? $data['vendor_id']);
+            }
+
+            // PRODUCT
+            if (!empty($data['product_id']) && (string)($oldData['product_id'] ?? '') !== (string)$data['product_id']) {
+                $pOld = optional(\App\Models\Product::find($oldData['product_id']))->name;
+                $pNew = optional(\App\Models\Product::find($data['product_id']))->name;
+                try { $pOld = \App\Services\CryptService::decryptData($pOld) ?? $pOld; } catch (\Exception $e) {}
+                try { $pNew = \App\Services\CryptService::decryptData($pNew) ?? $pNew; } catch (\Exception $e) {}
+                $changedLines[] = "Product: " . ($pOld ?? $oldData['product_id']) . " → " . ($pNew ?? $data['product_id']);
+            }
+
+            // STATUS
+            if (isset($data['status']) && (string)($oldData['status'] ?? '') !== (string)$data['status']) {
+                $statusLabel = fn($s) => $s == 1 ? 'Active' : 'Inactive';
+                $changedLines[] = "Status: " . $statusLabel($oldData['status']) . " → " . $statusLabel($data['status']);
+            }
+
+            $activityDescription = count($changedLines) > 0
+                ? implode("\n", $changedLines)
+                : "Subscription updated";
+
             ActivityLogger::logActivity(
                 auth()->user() ?? (object)['id' => $request->input('s_id') ?? null],
                 'UPDATE',
@@ -301,7 +407,7 @@ class SubscriptionController extends Controller
                 $record->id,
                 $oldData,
                 $record->toArray(),
-                "Subscription updated",
+                $activityDescription,
                 $request
             );
 

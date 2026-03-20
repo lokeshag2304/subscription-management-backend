@@ -336,7 +336,9 @@ public function GetDashboardData(Request $request)
                     'amount' => $amount,
                     'client_name' => $clientName,
                     'vendor_name' => $vendorName,
-                    'remarks' => $remarks
+                    'remarks' => $remarks,
+                    'grace_period' => $row->grace_period ?? 0,
+                    'due_date' => $row->due_date ?? null
                 ];
             }
         }
@@ -537,6 +539,8 @@ public function getActivities(Request $request)
                 'days_to_expired' => $daysToExpired,
                 'created_at' => $subscription->created_at->toDateTimeString(),
                 'updated_at' => $subscription->updated_at->toDateTimeString(),
+                'grace_period' => $subscription->grace_period ?? 0,
+                'due_date' => $subscription->due_date,
             ];
 
             // Fetch remarks

@@ -3,14 +3,18 @@
 namespace App\Http\Controllers;
 
 use App\Models\SSL;
-use App\Models\Activity;
-use App\Models\ImportExportHistory;
+use App\Models\Product;
+use App\Models\Superadmin;
+use App\Models\Vendor;
+use App\Models\Domain;
 use Illuminate\Http\Request;
-use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Carbon;
 use App\Services\ActivityLogger;
 use App\Services\ClientScopeService;
+use App\Services\CryptService;
 use App\Services\DateFormatterService;
+use App\Services\GracePeriodService;
 
 class SSLController extends Controller
 {
@@ -71,7 +75,8 @@ class SSLController extends Controller
         $query = SSL::select([
             'id', 'domain_id', 'product_id', 'client_id', 'vendor_id', 
             'amount', 'renewal_date', 'deletion_date', 'status', 
-            'remarks', 'created_at', 'updated_at'
+            'remarks', 'created_at', 'updated_at',
+            'grace_period', 'due_date'
         ])
         ->with([
             'product:id,name', 
@@ -184,6 +189,8 @@ class SSLController extends Controller
                 'days_left' => $daysLeft,
                 'deletion_date' => $item->deletion_date,
                 'days_to_delete' => $daysToDelete,
+                'grace_period' => $item->grace_period ?? 0,
+                'due_date' => $item->due_date,
                 'status' => $item->status,
                 'remarks' => $remarks,
                 'has_remark_history' => $item->remark_histories_count > 0,
@@ -266,9 +273,13 @@ class SSLController extends Controller
                'deletion_date' => $request->deletion_date,
                'days_left'     => $days_left,
                'days_to_delete'=> $days_to_delete,
+               'grace_period'  => $request->grace_period ?? 0,
                'status'        => $request->status ?? 1,
                'remarks'       => $request->remarks ? \App\Services\CryptService::encryptData($request->remarks) : null
             ]);
+
+            \App\Services\GracePeriodService::syncModel($model);
+            $model->save();
 
             try { 
                 $model->remarks = \App\Services\CryptService::decryptData($model->remarks);
@@ -362,14 +373,18 @@ class SSLController extends Controller
 
         $this->calculateFields($data);
 
+        // Track Remark History
+        \App\Services\RemarkHistoryService::logUpdate('SSL', $record, $data);
+
         if (isset($data['remarks'])) {
-            // Track before encrypting
-            \App\Services\RemarkHistoryService::trackChange('SSL', $record->id, $record->remarks, $data['remarks']);
             $data['remarks'] = \App\Services\CryptService::encryptData($data['remarks']);
         }
 
         $oldData = clone $record;
         $record->update($data);
+
+        \App\Services\GracePeriodService::syncModel($record);
+        $record->save();
 
         // Sync client_id to the domain table so derived relations work
         if ($record->domain_id && $record->client_id) {
@@ -396,8 +411,7 @@ class SSLController extends Controller
         try { $record->vendor_name = \App\Services\CryptService::decryptData($record->vendor_name) ?? $record->vendor_name; } catch (\Exception $e) {}
         
         $record->domain_name  = $decryptedDomain;
-        $decodedRemarks       = \App\Services\CryptService::decryptData($record->remarks);
-        $record->remarks      = \App\Services\CryptService::decryptData($decodedRemarks); // Recovery
+        try { $record->remarks = \App\Services\CryptService::decryptData($record->remarks); } catch (\Exception $e) {}
         $record->expiry_date  = $record->renewal_date;
         $record->has_remark_history = $record->remark_histories_count > 0;
         

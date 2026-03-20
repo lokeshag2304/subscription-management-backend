@@ -11,6 +11,7 @@ use Illuminate\Support\Carbon;
 use App\Services\ActivityLogger;
 use App\Services\ClientScopeService;
 use App\Services\DateFormatterService;
+use Illuminate\Support\Facades\Log;
 
 class DomainController extends Controller
 {
@@ -162,7 +163,8 @@ class DomainController extends Controller
         $query = Domain::select([
             'id', 'name', 'product_id', 'client_id', 'vendor_id', 
             'amount', 'renewal_date', 'deletion_date', 'status', 
-            'remarks', 'created_at', 'updated_at'
+            'remarks', 'created_at', 'updated_at',
+            'grace_period', 'due_date'
         ])
         ->with([
             'product:id,name', 
@@ -245,6 +247,8 @@ class DomainController extends Controller
                 $data['vendor_name'] = $item->vendor_name;
                 $data['remarks'] = $item->remarks;
                 $data['domain_name'] = $data['name'];
+                $data['grace_period'] = $item->grace_period ?? 0;
+                $data['due_date'] = $item->due_date;
 
                 $data['last_updated'] = DateFormatterService::format($item->updated_at);
                 $data['updated_at_formatted'] = DateFormatterService::format($item->updated_at);
@@ -269,6 +273,7 @@ class DomainController extends Controller
 
     public function storeDomain(Request $request)
     {
+        Log::info('Store Domain Request', ['url' => $request->fullUrl(), 'payload' => $request->all()]);
         try {
             // ── CLIENT SCOPE: force client_id from JWT if client ──
             ClientScopeService::enforceClientId($request);
@@ -336,9 +341,13 @@ class DomainController extends Controller
                'days_left'     => $days_left,
                'days_to_delete'=> $days_to_delete,
                'domain_protected' => $request->domain_protected ?? 0,
+               'grace_period'  => $request->grace_period ?? 0,
                'status'        => $request->status ?? 1,
                'remarks'       => $request->remarks ? \App\Services\CryptService::encryptData($request->remarks) : null
             ]);
+
+            \App\Services\GracePeriodService::syncModel($model);
+            $model->save();
             
             try { $model->remarks = \App\Services\CryptService::decryptData($model->remarks) ?? $model->remarks; } catch (\Exception $e) {}
 
@@ -389,6 +398,7 @@ class DomainController extends Controller
 
     public function updateDomain(Request $request)
     {
+        Log::info('Update Domain Request', ['url' => $request->fullUrl(), 'id' => $request->input('id'), 'payload' => $request->all()]);
         $id = $request->input('id');
         $record = Domain::find($id);
         if (!$record) return response()->json(['success' => false, 'message' => 'Not found'], 404);
@@ -428,9 +438,10 @@ class DomainController extends Controller
 
         $this->calculateFields($data);
 
+        // Track Remark History
+        \App\Services\RemarkHistoryService::logUpdate('Domain', $record, $data);
+
         if (isset($data['remarks'])) {
-            // Track Remark History
-            \App\Services\RemarkHistoryService::trackChange('Domains', $record->id, $record->remarks, $data['remarks']);
             $data['remarks'] = \App\Services\CryptService::encryptData($data['remarks']);
         }
 
@@ -449,10 +460,15 @@ class DomainController extends Controller
             'deletion_date'    => $data['deletion_date'] ?? $record->deletion_date,
             'days_left'        => $data['days_left'] ?? $record->days_left,
             'days_to_delete'   => $data['days_to_delete'] ?? $record->days_to_delete,
+            'grace_period'     => $data['grace_period'] ?? $record->grace_period,
             'status'           => $data['status'] ?? $record->status,
             'domain_protected' => $data['domain_protected'] ?? $record->domain_protected,
             'remarks'          => $data['remarks'] ?? $record->remarks,
         ]);
+        
+        \App\Services\GracePeriodService::syncModel($record);
+        $record->save();
+
         $record->refresh()->load(['product', 'client', 'vendor'])->loadCount('remarkHistories');
         $record->client_name  = $record->client->name  ?? null;
         try { $record->client_name = \App\Services\CryptService::decryptData($record->client_name) ?? $record->client_name; } catch (\Exception $e) {}
@@ -463,8 +479,7 @@ class DomainController extends Controller
         $record->vendor_name  = $record->vendor->name  ?? null;
         try { $record->vendor_name = \App\Services\CryptService::decryptData($record->vendor_name) ?? $record->vendor_name; } catch (\Exception $e) {}
         
-        $decryptedRemarks = \App\Services\CryptService::decryptData($record->remarks);
-        $record->remarks      = \App\Services\CryptService::decryptData($decryptedRemarks); 
+        $record->remarks      = \App\Services\CryptService::decryptData($record->remarks); 
         
         $record->expiry_date  = $record->renewal_date;
         $record->has_remark_history = $record->remark_histories_count > 0;

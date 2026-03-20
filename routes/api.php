@@ -52,7 +52,7 @@ Route::post('/delete-domain', [DomainController::class, 'deleteDomains']);
 
 Route::prefix('Products')->group(function () {
 Route::post('/add-products', [ProductsController::class, 'storeProducts']);
-Route::post('/update-products', [ProductsController::class, 'updateProducts']);
+Route::put('/update-products', [ProductsController::class, 'updateProducts']);
 Route::post('/list-products', [ProductsController::class, 'ProductsList']);
 Route::post('/delete-products', [ProductsController::class, 'deleteProducts']);
 
@@ -170,10 +170,8 @@ Route::apiResource('hostings', HostingController::class);
 
 }); // <-- End of secure group
 
-
-
-// The routes were moved up into the auth group
-
+// Correct Domain update route as requested: PUT /api/domains/{id}
+Route::put('/domains/{id}', [DomainController::class, 'update'])->middleware('route.access');
 
 Route::get('/import-history', [\App\Http\Controllers\ImportHistoryController::class, 'index']);
 Route::get('/import-history/download/{id}', [\App\Http\Controllers\ImportHistoryController::class, 'download']);

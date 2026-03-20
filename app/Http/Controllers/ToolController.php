@@ -16,6 +16,8 @@ class ToolController extends Controller
                 $item->updated_at = $item->updated_at->format('j/n/Y, g:i:s a');
                 $item->last_updated = $item->updated_at;
                 $item->created_at = $item->created_at->format('j/n/Y, g:i:s a');
+                $item->grace_period = $item->grace_period ?? 0;
+                $item->due_date = $item->due_date;
                 return $item;
             })
         ]);
@@ -31,6 +33,7 @@ class ToolController extends Controller
             'expiry_date' => 'nullable|date',
             'status' => 'nullable|boolean',
             'remarks' => 'nullable|string',
+            'grace_period' => 'nullable|integer',
         ]);
 
         $record = Tool::create($validated);
@@ -42,6 +45,8 @@ class ToolController extends Controller
                 $r->updated_at = $r->updated_at->format('j/n/Y, g:i:s a');
                 $r->last_updated = $r->updated_at;
                 $r->created_at = $r->created_at->format('j/n/Y, g:i:s a');
+                $r->grace_period = $r->grace_period ?? 0;
+                $r->due_date = $r->due_date;
             })
         ], 201);
     }
@@ -75,6 +80,7 @@ class ToolController extends Controller
             'expiry_date' => 'nullable|date',
             'status' => 'nullable|boolean',
             'remarks' => 'nullable|string',
+            'grace_period' => 'nullable|integer',
         ]);
 
         $record->update($validated);
@@ -86,6 +92,8 @@ class ToolController extends Controller
                 $r->updated_at = $r->updated_at->format('j/n/Y, g:i:s a');
                 $r->last_updated = $r->updated_at;
                 $r->created_at = $r->created_at->format('j/n/Y, g:i:s a');
+                $r->grace_period = $r->grace_period ?? 0;
+                $r->due_date = $r->due_date;
             })
         ]);
     }

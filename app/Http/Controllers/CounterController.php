@@ -3,14 +3,17 @@
 namespace App\Http\Controllers;
 
 use App\Models\Counter;
-use App\Models\Activity;
-use App\Models\ImportExportHistory;
+use App\Models\Product;
+use App\Models\Superadmin;
+use App\Models\Vendor;
 use Illuminate\Http\Request;
-use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Carbon;
 use App\Services\ActivityLogger;
 use App\Services\ClientScopeService;
+use App\Services\CryptService;
 use App\Services\DateFormatterService;
+use App\Services\GracePeriodService;
 
 class CounterController extends Controller
 {
@@ -82,7 +85,8 @@ class CounterController extends Controller
         $query = Counter::select([
             'id', 'product_id', 'client_id', 'vendor_id', 
             'amount', 'renewal_date', 'deletion_date', 'status', 
-            'remarks', 'created_at', 'updated_at'
+            'remarks', 'created_at', 'updated_at',
+            'grace_period', 'due_date'
         ])
         ->with([
             'product:id,name', 
@@ -136,10 +140,7 @@ class CounterController extends Controller
                 try { $item->vendor_name = \App\Services\CryptService::decryptData($item->vendor_name) ?? $item->vendor_name; } catch (\Exception $e) {}
 
                 $item->has_remark_history = $item->remark_histories_count > 0;
-                try {
-                    $dec = \App\Services\CryptService::decryptData($item->remarks);
-                    $item->remarks = \App\Services\CryptService::decryptData($dec);
-                } catch (\Exception $e) {}
+                try { $item->remarks = \App\Services\CryptService::decryptData($item->remarks); } catch (\Exception $e) {}
 
                 $formattedUpdated = Carbon::parse($item->updated_at)->format('j/n/Y, g:i:s a');
                 $formattedCreated = Carbon::parse($item->created_at ?? $item->updated_at)->format('j/n/Y, g:i:s a');
@@ -152,6 +153,8 @@ class CounterController extends Controller
                 $data['vendor_name'] = $item->vendor_name;
                 $data['has_remark_history'] = $item->has_remark_history;
                 $data['remarks'] = $item->remarks;
+                $data['grace_period'] = $item->grace_period ?? 0;
+                $data['due_date'] = $item->due_date;
 
                 $data['last_updated'] = DateFormatterService::format($item->updated_at);
                 $data['updated_at_formatted'] = DateFormatterService::format($item->updated_at);
@@ -207,19 +210,24 @@ class CounterController extends Controller
 
             $amount = $this->getDerivedCount($request->client_id, $request->product_id, $request->vendor_id);
 
-            // STEP 5 — STANDARD CREATE LOGIC
-            $model = Counter::create([
-               'product_id'    => $request->product_id,
-               'client_id'     => $request->client_id,
-               'vendor_id'     => $request->vendor_id,
-               'amount'        => $amount,
-               'renewal_date'  => $request->renewal_date,
-               'deletion_date' => $request->deletion_date,
-               'days_left'     => $request->renewal_date ? $today->diffInDays($request->renewal_date, false) : null,
-               'days_to_delete'=> $request->deletion_date ? $today->diffInDays($request->deletion_date, false) : null,
-               'status'        => $request->status ?? 1,
-               'remarks'       => \App\Services\CryptService::encryptData($request->remarks)
-            ]);
+             $today = now()->startOfDay();
+             // STEP 5 — STANDARD CREATE LOGIC
+             $model = Counter::create([
+                'product_id'    => $request->product_id,
+                'client_id'     => $request->client_id,
+                'vendor_id'     => $request->vendor_id,
+                'amount'        => $amount,
+                'renewal_date'  => $request->renewal_date,
+                'deletion_date' => $request->deletion_date,
+                'days_left'     => $request->renewal_date ? $today->diffInDays($request->renewal_date, false) : null,
+                'days_to_delete'=> $request->deletion_date ? $today->diffInDays($request->deletion_date, false) : null,
+                'grace_period'  => $request->grace_period ?? 0,
+                'status'        => $request->status ?? 1,
+                'remarks'       => \App\Services\CryptService::encryptData($request->remarks)
+             ]);
+
+             \App\Services\GracePeriodService::syncModel($model);
+             $model->save();
 
             // STEP 7 — STANDARD SUCCESS RESPONSE
             $model->refresh()->load(['product', 'client', 'vendor']);
@@ -294,20 +302,19 @@ class CounterController extends Controller
  
         $this->calculateFields($data);
 
-        if (isset($data['remarks'])) {
             // Track Remark History
-            \App\Services\RemarkHistoryService::trackChange('Counter', $record->id, $record->remarks, $data['remarks']);
-            $data['remarks'] = \App\Services\CryptService::encryptData($data['remarks']);
-        }
+            \App\Services\RemarkHistoryService::logUpdate('Counter', $record, $data);
+
+            if (isset($data['remarks'])) {
+                $data['remarks'] = \App\Services\CryptService::encryptData($data['remarks']);
+            }
 
         // Capture old state for logging
-        $oldData = $record->toArray();
-        if ($record->client)   $oldData['client']  = $record->client_name;
-        if ($record->product)  $oldData['product'] = $record->product_name;
-        if ($record->vendor)   $oldData['vendor']  = $record->vendor_name;
-
-        // Perform Update
+        $oldData = clone $record;
         $record->update($data);
+
+        \App\Services\GracePeriodService::syncModel($record);
+        $record->save();
         $record->refresh()->load(['product', 'client', 'vendor'])->loadCount('remarkHistories');
         
         // Decrypt names for logging/response

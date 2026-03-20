@@ -10,7 +10,7 @@ use App\Models\Vendor;
 
 class Email extends Model
 {
-    use HasFactory;
+    use HasFactory, \App\Traits\GracePeriodTrait;
     
     protected $table = 'emails';
 
@@ -27,6 +27,8 @@ class Email extends Model
         'deletion_date',
         'days_left',
         'days_to_delete',
+        'grace_period',
+        'due_date',
         'status',
         'remarks',
     ];

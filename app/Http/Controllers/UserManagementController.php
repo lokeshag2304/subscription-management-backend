@@ -12,10 +12,14 @@ class UserManagementController extends Controller
         return response()->json([
             'status' => true,
             'message' => 'Fetched successfully',
-            'data' => UserManagement::latest()->get()->map(function($item) {
+            'data' => UserManagement::withCount('remarkHistories')->latest()->get()->map(function($item) {
                 $item->updated_at = $item->updated_at->format('j/n/Y, g:i:s a');
                 $item->last_updated = $item->updated_at;
                 $item->created_at = $item->created_at->format('j/n/Y, g:i:s a');
+                $item->grace_period = $item->grace_period ?? 0;
+                $item->due_date = $item->due_date;
+                $item->has_remark_history = $item->remark_histories_count > 0;
+                try { $item->remarks = \App\Services\CryptService::decryptData($item->remarks); } catch (\Exception $e) {}
                 return $item;
             })
         ]);
@@ -31,9 +35,13 @@ class UserManagementController extends Controller
             'expiry_date' => 'nullable|date',
             'status' => 'nullable|boolean',
             'remarks' => 'nullable|string',
+            'grace_period' => 'nullable|integer',
         ]);
 
         $record = UserManagement::create($validated);
+        
+        \App\Services\GracePeriodService::syncModel($record);
+        $record->save();
 
         return response()->json([
             'status' => true,
@@ -42,6 +50,8 @@ class UserManagementController extends Controller
                 $r->updated_at = $r->updated_at->format('j/n/Y, g:i:s a');
                 $r->last_updated = $r->updated_at;
                 $r->created_at = $r->created_at->format('j/n/Y, g:i:s a');
+                $r->grace_period = $r->grace_period ?? 0;
+                $r->due_date = $r->due_date;
             })
         ], 201);
     }
@@ -75,9 +85,21 @@ class UserManagementController extends Controller
             'expiry_date' => 'nullable|date',
             'status' => 'nullable|boolean',
             'remarks' => 'nullable|string',
+            'grace_period' => 'nullable|integer',
         ]);
 
+        // Track Remark History
+        \App\Services\RemarkHistoryService::logUpdate('UserManagement', $record, $validated);
+
+        if (isset($validated['remarks'])) {
+            $validated['remarks'] = \App\Services\CryptService::encryptData($validated['remarks']);
+        }
+
         $record->update($validated);
+        
+        \App\Services\GracePeriodService::syncModel($record);
+        $record->save();
+        $record->loadCount('remarkHistories');
 
         return response()->json([
             'status' => true,
@@ -86,6 +108,8 @@ class UserManagementController extends Controller
                 $r->updated_at = $r->updated_at->format('j/n/Y, g:i:s a');
                 $r->last_updated = $r->updated_at;
                 $r->created_at = $r->created_at->format('j/n/Y, g:i:s a');
+                $r->grace_period = $r->grace_period ?? 0;
+                $r->due_date = $r->due_date;
             })
         ]);
     }

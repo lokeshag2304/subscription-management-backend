@@ -812,7 +812,9 @@ public function GetClientDetails(Request $request)
                     'status',
                     'product_id',
                     'created_at',
-                    'days_left as days_to_expired'
+                    'days_left as days_to_expired',
+                    'grace_period',
+                    'due_date'
                 )
                 ->where('client_id', $clientId);
             
@@ -880,7 +882,9 @@ public function GetClientDetails(Request $request)
                 'status'          => (!isset($row->status) || $row->status == 1) ? 'Active' : 'Deactive',
                 'product_name'    => $productName,
                 'created_at'      => Carbon::parse($row->created_at)->format('d F Y'),
-                'days_to_expired' => $row->days_to_expired ?? 0
+                'days_to_expired' => $row->days_to_expired ?? 0,
+                'grace_period'    => $row->grace_period ?? 0,
+                'due_date'        => $row->due_date
             ];
         }
 

@@ -7,7 +7,7 @@ use Illuminate\Database\Eloquent\Model;
 
 class Tool extends Model
 {
-    use HasFactory;
+    use HasFactory, \App\Traits\GracePeriodTrait;
     protected $table = 'tools';
     protected $guarded = [];
 }

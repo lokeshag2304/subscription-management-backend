@@ -11,7 +11,7 @@ use App\Models\Domain;
 
 class SSL extends Model
 {
-    use HasFactory;
+    use HasFactory, \App\Traits\GracePeriodTrait;
     protected $table = 's_s_l_s';
     
     protected $fillable = [
@@ -24,6 +24,8 @@ class SSL extends Model
         'deletion_date',
         'days_left',
         'days_to_delete',
+        'grace_period',
+        'due_date',
         'status',
         'remarks'
     ];

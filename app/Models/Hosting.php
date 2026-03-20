@@ -10,7 +10,7 @@ use App\Models\Vendor;
 
 class Hosting extends Model
 {
-    use HasFactory;
+    use HasFactory, \App\Traits\GracePeriodTrait;
     
     protected $table = 'hostings';
 
@@ -26,6 +26,8 @@ class Hosting extends Model
         'deletion_date',
         'days_left',
         'days_to_delete',
+        'grace_period',
+        'due_date',
         'status',
         'remarks',
     ];
